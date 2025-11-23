@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: pykachu-volleyball-env
+Version: 0.0.1
+Summary: A single-agent reinforcement learning environment of the game Pikachu Volleyball, using gymnasium
+Author-email: Frog-Slayer <pj0642@gmail.com>
+Project-URL: repository, https://github.com/Frog-Slayer/Pykachu-Volleyball
+Keywords: pikachu,volleyball,gym,gymnasium,reinforcement-learning
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Requires-Python: >=3.8
