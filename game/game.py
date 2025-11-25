@@ -16,7 +16,7 @@ clock = pygame.time.Clock()
 score = [0, 0]
 
 while running:
-    clock.tick(120)
+    clock.tick(50)
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -49,18 +49,12 @@ while running:
     # Reset round when someone scores
     if done:
         obs = env.reset()
-        if(reward!=0):
-            if(reward==1):
-                if(is_player_2_computer):
-                    score[0]+=1
-                else:
-                    score[1]+=1
-            else:
-                if(is_player_2_computer):
-                    score[1]+=1
-                else:
-                    score[0]+=1
-            print(f"Score player1:{score[0]} player2:{score[1]}")
+        
+        if(info["ball"]["x"]>216):
+                score[0]+=1
+        else:
+                score[1]+=1
+        print(f"Score player1:{score[0]} player2:{score[1]}")
 
 env.close()
 pygame.quit()
