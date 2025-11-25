@@ -1,6 +1,8 @@
 import os
 import time
 import random
+import math
+from collections import deque
 import numpy as np
 
 import gymnasium as gym   # works also for old gym API with small tweaks
@@ -15,23 +17,27 @@ from tqdm import trange, tqdm
 # ------------ Config ------------
 ENV_ID = 'PykachuVolleyball-v0'  # adjust if your env id is different
 ACTION_DIMS = [3, 3, 2]          # MultiDiscrete([3, 3, 2])
-DOWNSAMPLED_SHAPE = (216, 152)   # (H, W) after downsampling
+DOWNSAMPLED_SHAPE = (160, 120)   # (H, W) after downsampling
+FRAME_STACK = 3                  # how many recent frames to stack (channel-wise)
 ACTION_REPEAT = 2                # repeat each action this many env steps
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-TOTAL_UPDATES    = 500          # how many PPO updates
-ROLLOUT_STEPS    = 1024          # steps per rollout
-GAMMA            = 0.99
+TOTAL_UPDATES    = 250          # how many PPO updates
+ROLLOUT_STEPS    = 2048          # steps per rollout
+GAMMA            = 0.995
 GAE_LAMBDA       = 0.95
 PPO_EPOCHS       = 4
-MINIBATCH_SIZE   = 512
+MINIBATCH_SIZE   = 1024
 CLIP_EPS         = 0.1
-LR_START         = 1e-4
-LR_END           = 1e-5
-VF_COEF          = 0.7
-ENT_COEF_START   = 0.03
-ENT_COEF_END     = 0.005
+LR_START         = 3e-4
+LR_END           = 5e-5
+LR_DECAY_K       = 0.5           # unused when linear
+VF_COEF          = 0.5
+VALUE_CLIP       = 0.2
+ENT_COEF_START   = 0.02
+ENT_COEF_END     = 0.01
+ENT_DECAY_K      = 0.5           # unused when linear
 MAX_GRAD_NORM    = 0.5
 
 
@@ -66,52 +72,59 @@ def obs_to_tensor(obs_np):
     return torch.from_numpy(obs_np).to(DEVICE).float() / 255.0
 
 
+def stack_frames(frames_deque):
+    """
+    Concatenate a deque of frames along the channel axis.
+    """
+    return np.concatenate(list(frames_deque), axis=-1)
+
+
 # ------------ Network ------------
 class PikachuPPO(nn.Module):
     """
     CNN encoder + 3 categorical policy heads (for MultiDiscrete)
     + value head.
     """
-    def __init__(self, action_dims=ACTION_DIMS):
+    def __init__(self, action_dims=ACTION_DIMS, input_channels=3 * FRAME_STACK):
         super().__init__()
         self.action_dims = action_dims
 
-        # Input: (B, H, W, C) with H=DOWNSAMPLED_SHAPE[0], W=DOWNSAMPLED_SHAPE[1], C=3
+        # Input: (B, H, W, C) with H=DOWNSAMPLED_SHAPE[0], W=DOWNSAMPLED_SHAPE[1], C=input_channels
         # We'll internally permute to (B, C, H, W).
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4),
+            nn.Conv2d(input_channels, 64, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1),
             nn.ReLU(),
         )
 
         # Figure out conv output size by doing a dummy forward
         with torch.no_grad():
-            dummy = torch.zeros(1, 3, DOWNSAMPLED_SHAPE[0], DOWNSAMPLED_SHAPE[1])
+            dummy = torch.zeros(1, input_channels, DOWNSAMPLED_SHAPE[0], DOWNSAMPLED_SHAPE[1])
             conv_out = self.conv(dummy)
             conv_out_size = conv_out.view(1, -1).size(1)
 
         # Shared trunk
         self.shared = nn.Sequential(
-            nn.Linear(conv_out_size, 256),
-            nn.LayerNorm(256),
+            nn.Linear(conv_out_size, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
         )
 
         # Actor tower
         self.actor_body = nn.Sequential(
-            nn.Linear(256, 128),
+            nn.Linear(512, 256),
             nn.ReLU(),
         )
-        self.policy_heads = nn.ModuleList([nn.Linear(128, n) for n in action_dims])
+        self.policy_heads = nn.ModuleList([nn.Linear(256, n) for n in action_dims])
 
         # Critic tower
         self.critic_body = nn.Sequential(
-            nn.Linear(256, 128),
+            nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(128, 1),
+            nn.Linear(256, 1),
         )
 
     def forward(self, obs):
@@ -222,12 +235,14 @@ def train():
     else:
         obs_env = reset_result
 
-    obs = downsample_obs(obs_env)
-    obs_shape = obs.shape  # (H, W, C) after downsampling
+    obs_frame = downsample_obs(obs_env)
+    frames = deque([obs_frame] * FRAME_STACK, maxlen=FRAME_STACK)
+    stacked_obs = stack_frames(frames)
+    obs_shape = stacked_obs.shape  # (H, W, C*FRAME_STACK)
     action_dim = len(ACTION_DIMS)
 
-    agent = PikachuPPO(ACTION_DIMS).to(DEVICE)
-    optimizer = torch.optim.Adam(agent.parameters(), lr=LR_START)
+    agent = PikachuPPO(ACTION_DIMS, input_channels=3 * FRAME_STACK).to(DEVICE)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=LR_START, weight_decay=1e-5)
 
     buffer = RolloutBuffer(ROLLOUT_STEPS, obs_shape, action_dim)
 
@@ -238,8 +253,9 @@ def train():
 
         # Linear annealing for LR and entropy coefficient
         progress = (update - 1) / max(TOTAL_UPDATES - 1, 1)
-        lr_now = LR_START + (LR_END - LR_START) * progress
-        ent_coef_now = ENT_COEF_START + (ENT_COEF_END - ENT_COEF_START) * progress
+        slow = min(progress * 0.5, 1.0)  # decay at half speed
+        lr_now = LR_START + (LR_END - LR_START) * slow
+        ent_coef_now = ENT_COEF_START + (ENT_COEF_END - ENT_COEF_START) * slow
         for g in optimizer.param_groups:
             g['lr'] = lr_now
 
@@ -248,7 +264,7 @@ def train():
             env.render()
 
             # Preprocess observation: uint8 -> float32 in [0,1]
-            obs_tensor = obs_to_tensor(obs).unsqueeze(0)  # (1, H, W, C)
+            obs_tensor = obs_to_tensor(stacked_obs).unsqueeze(0)  # (1, H, W, C)
 
             with torch.no_grad():
                 actions_tensor, logprobs_tensor, _, values_tensor = agent.get_action_and_value(obs_tensor)
@@ -275,9 +291,11 @@ def train():
                     break
 
             # Downsample next observation for storage / next step
-            obs = downsample_obs(obs_env)
+            obs_frame = downsample_obs(obs_env)
+            frames.append(obs_frame)
+            stacked_obs = stack_frames(frames)
 
-            buffer.add(obs, action, logprob, total_reward, done, value)
+            buffer.add(stacked_obs, action, logprob, total_reward, done, value)
 
             if done:
                 reset_result = env.reset()
@@ -285,11 +303,13 @@ def train():
                     obs_env, _ = reset_result
                 else:
                     obs_env = reset_result
-                obs = downsample_obs(obs_env)
+                obs_frame = downsample_obs(obs_env)
+                frames = deque([obs_frame] * FRAME_STACK, maxlen=FRAME_STACK)
+                stacked_obs = stack_frames(frames)
 
         # Compute last value for GAE
         with torch.no_grad():
-            obs_tensor = obs_to_tensor(obs).unsqueeze(0)
+            obs_tensor = obs_to_tensor(stacked_obs).unsqueeze(0)
             _, _, _, last_value_tensor = agent.get_action_and_value(obs_tensor)
             last_value = last_value_tensor.item()
 
@@ -306,6 +326,7 @@ def train():
         old_logprobs_tensor = torch.from_numpy(buffer.logprobs).to(DEVICE)    # (N,)
         returns_tensor = torch.from_numpy(buffer.returns).to(DEVICE)          # (N,)
         advantages_tensor = torch.from_numpy(buffer.advantages).to(DEVICE)    # (N,)
+        old_values_tensor = torch.from_numpy(buffer.values).to(DEVICE)        # (N,)
 
         # PPO updates
         for epoch in trange(PPO_EPOCHS, desc="PPO Epochs", leave=False):
@@ -315,6 +336,7 @@ def train():
                 mb_old_logprobs = old_logprobs_tensor[mb_idx]
                 mb_returns = returns_tensor[mb_idx]
                 mb_advantages = advantages_tensor[mb_idx]
+                mb_old_values = old_values_tensor[mb_idx]
 
                 _, new_logprobs, entropy, values = agent.get_action_and_value(mb_obs, mb_actions)
 
@@ -326,8 +348,11 @@ def train():
                 surr2 = torch.clamp(ratios, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Value loss
-                value_loss = F.mse_loss(values, mb_returns)
+                # Value loss with clipping
+                values_clipped = mb_old_values + (values - mb_old_values).clamp(-VALUE_CLIP, VALUE_CLIP)
+                value_loss_unclipped = (values - mb_returns).pow(2)
+                value_loss_clipped = (values_clipped - mb_returns).pow(2)
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
                 # Entropy bonus
                 entropy_loss = -entropy.mean()

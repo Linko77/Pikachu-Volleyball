@@ -5,11 +5,12 @@ import pygame
 from gymnasium.spaces import MultiDiscrete, Box
 
 from .constants import (
-    GROUND_HEIGHT, GROUND_WIDTH, GROUND_HALF_WIDTH
+    GROUND_HEIGHT, GROUND_WIDTH, GROUND_HALF_WIDTH, BALL_TOUCHING_GROUND_Y_COORD,
+    PLAYER_HALF_LENGTH
 )
 
 from .render import GameViewDrawer, Texture
-from .physics import PykaPhysics, UserInput, let_computer_decide_user_input
+from .physics import PykaPhysics, UserInput
 
 """
 RL environment for 'single' agent. The opponent is the basic AI, originally implemented in the game.
@@ -40,7 +41,11 @@ class PykachuEnv(gym.Env):
         self.is_player_2_computer = is_player_2_computer
         self.is_player_2_serve = False
         self._player1_hit_ball = False
-        self._imitation_bonus = 0.0
+        self._player2_hit_ball = False
+        self._last_touch = None  # "p1" | "p2" | None
+        self._steps_in_rally = 0
+        self._prev_ball_side = None
+        self._prev_ball_y_velocity = 0
         return
 
     @property
@@ -51,8 +56,7 @@ class PykachuEnv(gym.Env):
         pixels = pygame.surfarray.pixels3d(self._surface)
         return np.transpose(np.array(pixels), axes=(1, 0, 2))
 
-    @property
-    def reward(self):
+    def compute_reward(self, action=[0,0,0]):
         base = 0.0
         if self.is_ball_touching_ground:
             if self.physics.ball.punch_effect_x < GROUND_HALF_WIDTH: #player2 wins
@@ -62,23 +66,111 @@ class PykachuEnv(gym.Env):
                 self.is_player_2_serve = False
                 base = 1 if self.is_player_2_computer else -1
 
-        # Shaping: reward ball contacts, gently encourage positioning to expected landing.
-        # Note: values are kept small so terminal rewards dominate.
-        hit_bonus = 0.05 if self._player1_hit_ball else 0.0
-
         ball = self.physics.ball
         player1_x = self.physics.player1.x
 
-        # Distance to where the ball is expected to land (clipped for stability)
-        landing_dx = min(abs(ball.expected_landing_x - player1_x), GROUND_HALF_WIDTH)
-        if landing_dx < GROUND_HALF_WIDTH:
-            positioning_penalty = -0.0005 * landing_dx
-            proximity_bonus = 0.02 if landing_dx < 20 else 0.0
-        else:
-            positioning_penalty = 0.0
-            proximity_bonus = 0.0
+        shaping = 0.0
+        
+        # Efficiency: tiny step penalty to discourage stalling (further softened).
+        shaping -= 0.00005 * (1.0 + min(self._steps_in_rally, 400) / 400.0)
 
-        return base + hit_bonus + positioning_penalty +proximity_bonus + self._imitation_bonus
+        # Positioning: stay close to expected landing on our side; normalize penalty.
+        landing_dx = min(abs(ball.expected_landing_x - player1_x), GROUND_HALF_WIDTH)
+        if ball.expected_landing_x < GROUND_HALF_WIDTH - 5:
+            shaping -= 0.0002 * landing_dx
+            if landing_dx < 32:
+                shaping += 0.07
+            # Bonus for actively moving toward landing spot when not close yet.
+            moving_left = (action[0] - 1) < 0
+            moving_right = (action[0] - 1) > 0
+            if landing_dx > 16:
+                if (ball.expected_landing_x < player1_x and moving_left) or \
+                   (ball.expected_landing_x > player1_x and moving_right):
+                    shaping += 0.015
+
+        # Ball control + Rally pressure: when we hit, reward useful, penalize faults.
+        if self._player1_hit_ball:
+            shaping += 0.05  # basic contact bonus
+
+            expected_on_opponent = ball.expected_landing_x >= GROUND_HALF_WIDTH + 5
+            expected_on_ours = ball.expected_landing_x < GROUND_HALF_WIDTH - 5
+            expected_outside_bounds = ball.expected_landing_x < 0 or ball.expected_landing_x > GROUND_WIDTH
+
+            # Defensive save: contact when ball is low and descending on our side.
+            low_ball = ball.y > (BALL_TOUCHING_GROUND_Y_COORD - 80)
+            descending = self._prev_ball_y_velocity > 0
+            on_our_side = ball.x < GROUND_HALF_WIDTH + 4
+            if low_ball and descending and on_our_side:
+                shaping += 0.08
+
+            # Penalize sending the ball back to our side; reward sending it in-bounds to opponent.
+            if expected_on_ours and not expected_outside_bounds:
+                shaping -= 0.12
+            if expected_on_opponent and not expected_outside_bounds:
+                shaping += 0.10
+
+            # Power-hit specific incentives/penalties.
+            if action[2] == 1:
+                if expected_on_opponent and not expected_outside_bounds:
+                    shaping += 0.08
+                if expected_on_ours:
+                    shaping -= 0.1
+
+        # Penalize being far from a reachable ball on our side.
+        if ball.x < GROUND_HALF_WIDTH:
+            distance_to_ball = abs(ball.x - player1_x)
+            shaping -= 0.00015 * min(distance_to_ball, GROUND_HALF_WIDTH)
+
+        # Penalize ground power-hit/dive when ball is safely away on opponent side or far from us.
+        if action[2] == 1:
+            ball_on_opponent = ball.expected_landing_x > GROUND_HALF_WIDTH + 5
+            far_from_ball = abs(ball.x - player1_x) > 100
+            if ball_on_opponent or far_from_ball:
+                shaping -= 0.08
+
+            # Penalize rushing into walls/net when already near them.
+            x_dir = action[0] - 1  # -1 left, 0 noop, 1 right
+            near_left_wall = player1_x < PLAYER_HALF_LENGTH + 8
+            near_net = player1_x > GROUND_HALF_WIDTH - 20
+            if (near_left_wall and x_dir < 0) or (near_net and x_dir > 0):
+                shaping -= 0.05
+
+            # Encourage aerial power hits on our side when ball is reachable above ground.
+            player_on_air = self.physics.player1.y < (BALL_TOUCHING_GROUND_Y_COORD - 20)
+            ball_on_our_side = ball.x < GROUND_HALF_WIDTH - 5
+            ball_high_enough = ball.y < (BALL_TOUCHING_GROUND_Y_COORD - 30)
+            if player_on_air and ball_on_our_side and ball_high_enough:
+                shaping += 0.08
+
+            # Encourage emergency dives when a low, descending ball is landing on our side and we are far.
+            landing_ours = ball.expected_landing_x < GROUND_HALF_WIDTH - 5
+            low_and_descending = ball.y > (BALL_TOUCHING_GROUND_Y_COORD - 60) and ball.y_velocity > 0
+            far_reach = abs(ball.x - player1_x) > 48
+            if landing_ours and low_and_descending and far_reach:
+                shaping += 0.12
+
+        # Net-camping penalty: discourage hugging the net when ball is safely on opponent side.
+        if ball.x > GROUND_HALF_WIDTH + 10 and ball.expected_landing_x > GROUND_HALF_WIDTH + 20:
+            if player1_x > GROUND_HALF_WIDTH - 28:
+                shaping -= 0.1  # stronger deterrent near net
+                shaping -= 0.002 * (player1_x - (GROUND_HALF_WIDTH - 28))  # scaled penalty further in
+
+        # Jump spam penalty: avoid repeated jumps near net when ball is far away.
+        if ball.x > GROUND_HALF_WIDTH + 10:
+            if self.physics.player1.state in (1, 2):  # jumping / jump power-hit
+                shaping -= 0.03
+
+        # Encourage neutral standby away from net when waiting on opponent side.
+        if ball.x > GROUND_HALF_WIDTH + 10 and ball.expected_landing_x > GROUND_HALF_WIDTH + 20:
+            if player1_x < GROUND_HALF_WIDTH - 50:  # staying back a bit
+                shaping += 0.02
+
+
+        # Keep shaping bounded so terminal reward dominates.
+        shaping = float(np.clip(shaping, -0.15, 0.5))
+        
+
+        return base + shaping
 
 
     @property
@@ -110,28 +202,21 @@ class PykachuEnv(gym.Env):
         }
 
     def step(self, action):
-        # Compute heuristic "teacher" action for player1 to shape reward
-        teacher_input = UserInput()
-        let_computer_decide_user_input(
-            self.physics.player1,
-            self.physics.ball,
-            self.physics.player2,
-            teacher_input
-        )
-        teacher_action = np.array(
-            [teacher_input.x_direction + 1, teacher_input.y_direction + 1, teacher_input.power_hit],
-            dtype=np.int64
-        )
-        
         player1_input = UserInput(action)
         player2_input = UserInput(action)
 
+        ball = self.physics.ball
+        self._prev_ball_side = "p1_side" if ball.x < GROUND_HALF_WIDTH else "p2_side"
+        self._prev_ball_y_velocity = ball.y_velocity
+
         self.is_ball_touching_ground = self.physics.run_engine([player1_input, player2_input])
         self._player1_hit_ball = self.physics.player1.is_ball_collision_happened
+        self._player2_hit_ball = self.physics.player2.is_ball_collision_happened
 
-        # Imitation bonus: small reward when agent action matches heuristic
-        match = (teacher_action == np.array(action)).astype(np.float32)
-        self._imitation_bonus = 0.02 * 1 if match.mean() == 1 else 0.0
+        if self._player1_hit_ball:
+            self._last_touch = "p1"
+        elif self._player2_hit_ball:
+            self._last_touch = "p2"
 
         if self.is_ball_touching_ground:
             if self.physics.ball.punch_effect_x < GROUND_HALF_WIDTH: #player2 wins
@@ -139,7 +224,9 @@ class PykachuEnv(gym.Env):
             else:#player1 wins
                 self.is_player_2_serve = False
  
-        return self.observation, self.reward, self.terminated, self.info
+        self._steps_in_rally += 1
+
+        return self.observation, self.compute_reward(action), self.terminated, self.info
 
 
     def render(self):
@@ -168,6 +255,13 @@ class PykachuEnv(gym.Env):
         super().reset(seed = seed)
 
         self.physics.reset(self.is_player_2_serve)
+        self.is_ball_touching_ground = False
+        self._player1_hit_ball = False
+        self._player2_hit_ball = False
+        self._last_touch = None
+        self._steps_in_rally = 0
+        self._prev_ball_side = None
+        self._prev_ball_y_velocity = 0
 
         if self.render_mode is not None:
             self.render()
