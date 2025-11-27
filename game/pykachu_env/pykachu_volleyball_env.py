@@ -186,19 +186,37 @@ class PykachuEnv(gym.Env):
             "player1": {
                 "x": player1.x,
                 "y": player1.y,
-                "dive_direction" : player1.dive_direction 
+                "dive_direction" : player1.dive_direction,
+                "state": player1.state,
+                "frame_num": player1.frame_num
             },
             "player2":{
                 "x": player2.x,
                 "y": player2.y,
-                "dive_direction" : player2.dive_direction 
+                "dive_direction" : player2.dive_direction,
+                "state": player2.state,
+                "frame_num": player2.frame_num
+            },          
+            "punch": {
+                "visible": ball.punch_effect_radius > 0,
+                "x": ball.punch_effect_x,
+                "y": ball.punch_effect_y
+            },
+            "ball_hyper": {
+                "visible": ball.is_power_hit,
+                "x": ball.previous_x,
+                "y": ball.previous_y
+            },
+            "ball_trail": {
+                "visible": ball.is_power_hit,
+                "x": ball.pre_previous_x,
+                "y": ball.pre_previous_y
             },
             "ball": {
                 "x": ball.x,
-                "x_velocity": ball.x_velocity,
                 "y": ball.y,
-                "y_velocity": ball.y_velocity,
-            }
+                "rotation": ball.rotation,                
+            },
         }
 
     def step(self, action):
