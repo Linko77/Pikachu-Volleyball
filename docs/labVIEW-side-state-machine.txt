@@ -1,0 +1,7 @@
+  [閒置] → 設定名稱/模式 → [準備中]
+    ↓ create_match()
+  [連接中] → connect(ws_url) → [遊戲中]
+    ↓ send_input() + poll_state()
+  [遊戲中] → 檢測結束 → [結果顯示]
+    ↓ restart_match() or disconnect()
+  [結果顯示] → [遊戲中] or [閒置]
