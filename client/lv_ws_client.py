@@ -1,144 +1,22 @@
 """
-Blocking-safe client utilities for LabVIEW.
+LabVIEW-friendly REST API client for Pikachu Volleyball.
 
-The three exported functions (connect, send_input, poll_state) match the spec so
-LabVIEW can interact with the WebSocket server without touching asyncio.
+This module provides simple, synchronous HTTP functions for LabVIEW to interact
+with the Match Server via REST API polling (no WebSocket, no background threads).
+
+For 60 FPS gameplay, LabVIEW should call poll_state() every 16ms.
 """
 
 from __future__ import annotations
 
-import asyncio
 import configparser
-import json
-import queue
-import threading
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
-import websockets
 import requests
 
-_send_queue: "queue.Queue[str]" = queue.Queue()
-_latest_state: Optional[dict] = None
-_ws_thread: Optional[threading.Thread] = None
-_loop: Optional[asyncio.AbstractEventLoop] = None
-_ws: Optional[websockets.WebSocketClientProtocol] = None
-_stop_event = threading.Event()
+# ==== Configuration ====
 
-
-async def _ws_loop(url: str) -> None:
-    """Background asyncio loop that keeps a WebSocket open."""
-    global _latest_state, _ws
-    try:
-        async with websockets.connect(url) as ws:
-            _ws = ws
-            # register as player1 by default per spec
-            await ws.send(json.dumps({"type": "register", "role": "player1"}))
-
-            async def sender():
-                while not _stop_event.is_set():
-                    # Use run_in_executor for Python 3.8 compatibility
-                    loop = asyncio.get_event_loop()
-                    move = await loop.run_in_executor(None, _send_queue.get)
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "type": "input",
-                                "move": move,
-                            }
-                        )
-                    )
-
-            async def receiver():
-                global _latest_state
-                async for message in ws:
-                    data = json.loads(message)
-                    if data.get("type") == "state":
-                        _latest_state = data
-
-            await asyncio.gather(sender(), receiver())
-    except Exception as exc:  # pragma: no cover - used for diagnostics
-        _latest_state = {"type": "error", "detail": str(exc)}
-    finally:
-        _ws = None
-
-
-async def _close_ws():
-    """Close the active websocket connection if it exists."""
-    if _ws and not _ws.closed:
-        await _ws.close()
-
-
-def _thread_worker(url: str) -> None:
-    """Run the websocket loop on a dedicated event loop."""
-    global _loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    _loop = loop
-    try:
-        loop.run_until_complete(_ws_loop(url))
-    finally:
-        _loop = None
-
-
-def _ensure_thread(url: str) -> None:
-    global _ws_thread
-    if _ws_thread and _ws_thread.is_alive():
-        return
-    _stop_event.clear()
-    _ws_thread = threading.Thread(target=_thread_worker, args=(url,), daemon=True)
-    _ws_thread.start()
-
-
-# ==== Public API expected by LabVIEW ====
-
-def hello(s: str):
-    return "Hello, " + s
-
-
-def connect(url: str) -> None:
-    """Start the background WebSocket worker if it is not already running."""
-    _ensure_thread(url)
-
-
-def disconnect() -> None:
-    """Stop the background WebSocket worker and close the connection."""
-    _stop_event.set()
-    try:
-        _send_queue.put_nowait("none")  # unblock sender loop if waiting
-    except queue.Full:
-        pass
-
-    if _loop and _loop.is_running():
-        try:
-            future = asyncio.run_coroutine_threadsafe(_close_ws(), _loop)
-            future.result(timeout=1)
-        except Exception:
-            pass
-
-    if _ws_thread and _ws_thread.is_alive():
-        _ws_thread.join(timeout=1)
-
-
-def send_input(move: str) -> None:
-    """
-    Queue an input message that the background thread will push to the server.
-
-    move should be one of: left, right, jump, none.
-    """
-    if not move:
-        move = "none"
-    _send_queue.put(move)
-
-
-def poll_state():
-    """Return the latest state payload received from the server (or None)."""
-    return _latest_state
-
-
-# ==== HTTP REST API for LabVIEW ====
-
-# Load server URL from config file
 def _load_server_url() -> str:
     """Load Match Server URL from config/configfile.ini"""
     try:
@@ -151,9 +29,10 @@ def _load_server_url() -> str:
         pass
     return "http://localhost:8000"
 
-# Default server base URL from config
 _server_base_url = _load_server_url()
 
+
+# ==== Configuration Functions ====
 
 def set_server_url(url: str) -> None:
     """
@@ -166,6 +45,13 @@ def set_server_url(url: str) -> None:
     _server_base_url = url.rstrip("/")
 
 
+def hello(s: str) -> str:
+    """Test function for LabVIEW."""
+    return "Hello, " + s
+
+
+# ==== Match Management API ====
+
 def create_match(mode: str = "pvai", player_id: str = "player1", player_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a new match on the server.
@@ -176,10 +62,12 @@ def create_match(mode: str = "pvai", player_id: str = "player1", player_name: Op
         player_name: Display name for the player (optional)
 
     Returns:
-        Dictionary containing match_id, mode, player_name, and ws_url
+        Dictionary containing match_id, mode, and player_name
 
-    Raises:
-        Exception if the request fails
+    Example:
+        >>> match_info = create_match("pvai", "player1", "Howard")
+        >>> print(match_info)
+        {'match_id': 'abc123', 'mode': 'pvai', 'player_name': 'Howard'}
     """
     url = f"{_server_base_url}/match/start"
     payload = {
@@ -206,9 +94,6 @@ def get_match_status(match_id: str) -> Dict[str, Any]:
 
     Returns:
         Dictionary containing match status information
-
-    Raises:
-        Exception if the request fails
     """
     url = f"{_server_base_url}/match/{match_id}/status"
     try:
@@ -286,6 +171,131 @@ def get_server_status() -> Dict[str, Any]:
     url = f"{_server_base_url}/system/status"
     try:
         response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        return {"error": str(e)}
+
+
+# ==== Gameplay API (REST Polling) ====
+
+def connect(match_id: str, role: str = "player1") -> Dict[str, Any]:
+    """
+    Register player for REST API polling.
+
+    This registers the player with the server so they can send inputs
+    and poll game state. No background threads - all manual.
+
+    Args:
+        match_id: Match ID from create_match()
+        role: Player role ("player1" or "player2")
+
+    Returns:
+        Registration result with polling_interval_ms
+
+    Example:
+        >>> match_info = create_match("pvai", "player1", "Howard")
+        >>> result = connect(match_info["match_id"], "player1")
+        >>> print(result)
+        {'result': 'registered', 'match_id': '...', 'role': 'player1', 'polling_interval_ms': 16}
+    """
+    url = f"{_server_base_url}/match/{match_id}/register"
+    payload = {
+        "role": role,
+        "player_id": f"labview_{role}"
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        return {"error": str(e)}
+
+
+def send_input(match_id: str, move: str, role: str = "player1") -> Dict[str, Any]:
+    """
+    Send player input to the server.
+
+    Args:
+        match_id: Match ID
+        move: Player move ("left", "right", "jump", "none")
+        role: Player role
+
+    Returns:
+        Input submission result
+
+    Example:
+        >>> result = send_input(match_id, "jump", "player1")
+        >>> print(result)
+        {'result': 'accepted', 'queued_at': 1234567890.123}
+    """
+    url = f"{_server_base_url}/match/{match_id}/input"
+    payload = {
+        "role": role,
+        "move": move
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=0.5)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        return {"error": str(e)}
+
+
+def poll_state(match_id: str, role: str = "player1") -> Optional[Dict[str, Any]]:
+    """
+    Poll current game state (manual, synchronous).
+
+    For 60 FPS gameplay, LabVIEW should call this every 16ms in a loop.
+
+    Args:
+        match_id: Match ID
+        role: Player role
+
+    Returns:
+        State dict with ball, p1, p2, score, sequence, timestamp
+        Returns None if error
+
+    Example:
+        >>> state = poll_state(match_id, "player1")
+        >>> if state:
+        ...     print(f"Score: P1={state['score']['p1']}, P2={state['score']['p2']}")
+        ...     print(f"Ball: x={state['ball']['x']}, y={state['ball']['y']}")
+    """
+    url = f"{_server_base_url}/match/{match_id}/state"
+    params = {"role": role}
+
+    try:
+        response = requests.get(url, params=params, timeout=0.5)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException:
+        return None
+
+
+def disconnect(match_id: str, role: str = "player1") -> Dict[str, Any]:
+    """
+    Unregister player from match.
+
+    Args:
+        match_id: Match ID
+        role: Player role
+
+    Returns:
+        Unregistration result
+
+    Example:
+        >>> result = disconnect(match_id, "player1")
+        >>> print(result)
+        {'result': 'unregistered'}
+    """
+    url = f"{_server_base_url}/match/{match_id}/unregister"
+    payload = {"role": role}
+
+    try:
+        response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:

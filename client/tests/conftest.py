@@ -42,23 +42,3 @@ def match_cleanup():
             client.stop_match(match_id)
         except:
             pass
-
-
-@pytest.fixture
-def ws_cleanup():
-    """
-    Fixture to ensure WebSocket is disconnected after test.
-
-    Usage:
-        def test_example(ws_cleanup):
-            client.connect(ws_url)
-            # Test code...
-            # WebSocket will be disconnected automatically
-    """
-    yield
-
-    # Cleanup after test
-    try:
-        client.disconnect()
-    except:
-        pass
