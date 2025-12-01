@@ -27,7 +27,7 @@ def _load_server_url() -> str:
             return config.get("Server", "match_server_url", fallback="http://localhost:8000")
     except Exception:
         pass
-    return "http://localhost:8000"
+    return "http://140.113.123.37:8000"
 
 _server_base_url = _load_server_url()
 
@@ -80,9 +80,10 @@ def create_match(mode: str = "pvai", player_id: str = "player1", player_name: Op
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        return result.get("match_id", "")
     except requests.RequestException as e:
-        return {"error": str(e)}
+        return ""
 
 
 def get_match_status(match_id: str) -> Dict[str, Any]:
