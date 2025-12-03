@@ -124,8 +124,8 @@ class GameInstance:
         # TODO: For PvP mode, handle p2_action
         # Currently the environment manages AI internally
 
-        # Step environment
-        obs, reward, terminated, info = self.env.step([1, 2, 0])
+        # Step environment with the actual action
+        obs, reward, terminated, info = self.env.step(action)
 
         # Update scores if someone scored
         if terminated:
