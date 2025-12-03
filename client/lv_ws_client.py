@@ -124,7 +124,7 @@ def get_match_stats(match_id: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def restart_match(match_id: str) -> Dict[str, Any]:
+def restart_match(match_id: str) -> bool:
     """
     Restart a match, resetting scores and game state.
 
@@ -132,18 +132,18 @@ def restart_match(match_id: str) -> Dict[str, Any]:
         match_id: The match ID
 
     Returns:
-        Dictionary with result and current score
+        True if restart succeeded, False otherwise
     """
     url = f"{_server_base_url}/match/{match_id}/restart"
     try:
         response = requests.post(url, timeout=5)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        return {"error": str(e)}
+        return True
+    except requests.RequestException:
+        return False
 
 
-def stop_match(match_id: str) -> Dict[str, Any]:
+def stop_match(match_id: str) -> bool:
     """
     Stop and terminate a match.
 
@@ -151,15 +151,15 @@ def stop_match(match_id: str) -> Dict[str, Any]:
         match_id: The match ID
 
     Returns:
-        Dictionary with result status
+        True if stop succeeded, False otherwise
     """
     url = f"{_server_base_url}/match/{match_id}/stop"
     try:
         response = requests.post(url, timeout=5)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        return {"error": str(e)}
+        return True
+    except requests.RequestException:
+        return False
 
 
 def get_server_status() -> Dict[str, Any]:
@@ -180,25 +180,23 @@ def get_server_status() -> Dict[str, Any]:
 
 # ==== Gameplay API (REST Polling) ====
 
-def connect(match_id: str, role: str = "player1") -> Dict[str, Any]:
+def connect(match_id: str, role: str = "player1") -> bool:
     """
     Register player for REST API polling.
 
-    This registers the player with the server so they can send inputs
-    and poll game state. No background threads - all manual.
+    NOTE: This function is now OPTIONAL - the server will auto-register
+    players when they first call send_input() or poll_state().
 
     Args:
         match_id: Match ID from create_match()
         role: Player role ("player1" or "player2")
 
     Returns:
-        Registration result with polling_interval_ms
+        True if registration succeeded, False otherwise
 
     Example:
-        >>> match_info = create_match("pvai", "player1", "Howard")
-        >>> result = connect(match_info["match_id"], "player1")
-        >>> print(result)
-        {'result': 'registered', 'match_id': '...', 'role': 'player1', 'polling_interval_ms': 16}
+        >>> match_id = create_match("pvai", "player1", "Howard")
+        >>> success = connect(match_id, "player1")
     """
     url = f"{_server_base_url}/match/{match_id}/register"
     payload = {
@@ -209,27 +207,30 @@ def connect(match_id: str, role: str = "player1") -> Dict[str, Any]:
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        return {"error": str(e)}
+        return True
+    except requests.RequestException:
+        return False
 
 
-def send_input(match_id: str, move: str, role: str = "player1") -> Dict[str, Any]:
+def send_input(match_id: str, move: list[int], role: str = "player1") -> str:
     """
     Send player input to the server.
 
     Args:
         match_id: Match ID
-        move: Player move ("left", "right", "jump", "none")
+        move: Action array [x, y, power] where:
+              - x: 0=left, 1=none, 2=right
+              - y: 0=none, 1=normal, 2=jump
+              - power: 0=normal, 1=power hit
         role: Player role
 
     Returns:
-        Input submission result
+        True if input was accepted, False if error occurred
 
     Example:
-        >>> result = send_input(match_id, "jump", "player1")
-        >>> print(result)
-        {'result': 'accepted', 'queued_at': 1234567890.123}
+        >>> success = send_input(match_id, [1, 2, 0])  # jump
+        >>> if success:
+        ...     print("Input sent successfully")
     """
     url = f"{_server_base_url}/match/{match_id}/input"
     payload = {
@@ -240,12 +241,12 @@ def send_input(match_id: str, move: str, role: str = "player1") -> Dict[str, Any
     try:
         response = requests.post(url, json=payload, timeout=0.5)
         response.raise_for_status()
-        return response.json()
+        return "True"
     except requests.RequestException as e:
-        return {"error": str(e)}
+        return f"{e}"
 
 
-def poll_state(match_id: str, role: str = "player1") -> Optional[Dict[str, Any]]:
+def poll_state(match_id: str, role: Optional[str] = None) -> str:
     """
     Poll current game state (manual, synchronous).
 
@@ -253,30 +254,31 @@ def poll_state(match_id: str, role: str = "player1") -> Optional[Dict[str, Any]]
 
     Args:
         match_id: Match ID
-        role: Player role
+        role: Player role (optional, only used for connection tracking)
 
     Returns:
-        State dict with ball, p1, p2, score, sequence, timestamp
-        Returns None if error
+        JSON string with game state, or error message string
 
     Example:
-        >>> state = poll_state(match_id, "player1")
-        >>> if state:
-        ...     print(f"Score: P1={state['score']['p1']}, P2={state['score']['p2']}")
-        ...     print(f"Ball: x={state['ball']['x']}, y={state['ball']['y']}")
+        >>> # Simple usage - no role needed
+        >>> state_json = poll_state(match_id)
+        >>> # In LabVIEW, parse this JSON string to get ball position, score, etc.
+        >>> # Example JSON: {"ball": {"x": 216, "y": 100}, "score": {"p1": 0, "p2": 0}, ...}
     """
     url = f"{_server_base_url}/match/{match_id}/state"
-    params = {"role": role}
+    params = {}
+    if role:
+        params["role"] = role
 
     try:
         response = requests.get(url, params=params, timeout=0.5)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException:
-        return None
+        return response.text  # Return raw JSON string
+    except requests.RequestException as e:
+        return f"Error: {e}"
 
 
-def disconnect(match_id: str, role: str = "player1") -> Dict[str, Any]:
+def disconnect(match_id: str, role: str = "player1") -> bool:
     """
     Unregister player from match.
 
@@ -285,12 +287,10 @@ def disconnect(match_id: str, role: str = "player1") -> Dict[str, Any]:
         role: Player role
 
     Returns:
-        Unregistration result
+        True if unregistration succeeded, False otherwise
 
     Example:
-        >>> result = disconnect(match_id, "player1")
-        >>> print(result)
-        {'result': 'unregistered'}
+        >>> success = disconnect(match_id, "player1")
     """
     url = f"{_server_base_url}/match/{match_id}/unregister"
     payload = {"role": role}
@@ -298,6 +298,6 @@ def disconnect(match_id: str, role: str = "player1") -> Dict[str, Any]:
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        return {"error": str(e)}
+        return True
+    except requests.RequestException:
+        return False

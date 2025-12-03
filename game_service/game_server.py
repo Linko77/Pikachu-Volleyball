@@ -12,12 +12,13 @@ Architecture:
 - Supports both single-player (vs AI) and multi-player modes
 """
 
+import logging
 import os
 import sys
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional, final
+from typing import List, Optional, Union, final
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -48,8 +49,8 @@ class GameCreateRequest(BaseModel):
 
 class GameStepRequest(BaseModel):
     """Request to step the game forward."""
-    p1_action: str  # "left", "right", "jump", "none"
-    p2_action: Optional[str] = None  # For PvP mode
+    p1_action: List[int]  # [x, y, power] action array
+    p2_action: Optional[List[int]] = None  # For PvP mode
 
 
 @dataclass
@@ -88,36 +89,43 @@ class GameInstance:
         # Reset environment
         self.env.reset()
 
-        # Action mapping
-        self.action_map = {
-            "none": [1, 1, 0],
-            "left": [0, 1, 0],
-            "right": [2, 1, 0],
-            "jump": [1, 2, 0],
-            "power": [1, 1, 1],
-            "jump_left": [0, 2, 0],
-            "jump_right": [2, 2, 0],
-        }
+        # Action array format reference:
+        # [x, y, power] where:
+        #   x: 0=left, 1=none, 2=right
+        #   y: 0=none, 1=normal, 2=jump
+        #   power: 0=normal, 1=power hit
+        # Examples:
+        #   [1, 1, 0] = none
+        #   [0, 1, 0] = left
+        #   [2, 1, 0] = right
+        #   [1, 2, 0] = jump
+        #   [1, 1, 1] = power hit
+        #   [0, 2, 0] = jump left
+        #   [2, 2, 0] = jump right
 
-    def step(self, p1_action: str, p2_action: Optional[str] = None) -> GameState:
+    def step(self, p1_action: List[int], p2_action: Optional[List[int]] = None) -> GameState:
         """
         Execute one game step.
 
         Args:
-            p1_action: Player 1 action
-            p2_action: Player 2 action (optional, uses AI if None in pvai mode)
+            p1_action: Player 1 action array [x, y, power]
+            p2_action: Player 2 action array (optional, uses AI if None in pvai mode)
 
         Returns:
             Current game state
         """
-        # Convert action to environment format
-        action = self.action_map.get(p1_action, self.action_map["none"])
+        # Use the provided action array directly
+        action = p1_action
+
+        # Log action if not "none"
+        if action != [1, 1, 0]:
+            logging.info(f"[GAME] Player 1 action: {action}")
 
         # TODO: For PvP mode, handle p2_action
         # Currently the environment manages AI internally
 
         # Step environment
-        obs, reward, terminated, info = self.env.step(action)
+        obs, reward, terminated, info = self.env.step([1, 2, 0])
 
         # Update scores if someone scored
         if terminated:
@@ -240,6 +248,9 @@ async def step_game(game_id: str, request: GameStepRequest):
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
 
+    # Log incoming action at API level
+    logging.debug(f"[API] Step request for {game_id}: p1={request.p1_action}, p2={request.p2_action}")
+
     state = game.step(request.p1_action, request.p2_action)
     return {"state": asdict(state)}
 
@@ -298,11 +309,25 @@ async def list_games():
 
 def main():
     """Run the game service."""
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    print("=" * 60)
+    print("Pikachu Volleyball Game Service")
+    print("=" * 60)
+    print("Game Service running on: http://0.0.0.0:8001")
+    print("=" * 60)
+
     uvicorn.run(
         "game_server:app",
         host="0.0.0.0",
         port=8001,
         reload=False,
+        log_level="info"
     )
 
 

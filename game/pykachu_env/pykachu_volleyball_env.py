@@ -1,36 +1,37 @@
 import gymnasium as gym
 import numpy as np
 import pygame
-
-from gymnasium.spaces import MultiDiscrete, Box
+from gymnasium.spaces import Box, MultiDiscrete
 
 from .constants import (
-    GROUND_HEIGHT, GROUND_WIDTH, GROUND_HALF_WIDTH, BALL_TOUCHING_GROUND_Y_COORD,
-    PLAYER_HALF_LENGTH
+    BALL_TOUCHING_GROUND_Y_COORD,
+    GROUND_HALF_WIDTH,
+    GROUND_HEIGHT,
+    GROUND_WIDTH,
+    PLAYER_HALF_LENGTH,
 )
-
-from .render import GameViewDrawer, Texture
 from .physics import PykaPhysics, UserInput
+from .render import GameViewDrawer, Texture
 
 """
 RL environment for 'single' agent. The opponent is the basic AI, originally implemented in the game.
 Multi-agent environment using pettingzoo will be added later
 """
 class PykachuEnv(gym.Env):
-    action_space = MultiDiscrete([3, 3, 2]) 
+    action_space = MultiDiscrete([3, 3, 2])
     """
     (node, left, right), (none, up, down), (none, power hit)
     """
-    
+
     observation_space = Box(low = 0, high = 255, shape=(GROUND_WIDTH, GROUND_HEIGHT, 3),
                             dtype=np.uint8)
     """
     The Space object for all valid observations, corresponding to rendered display of the game(in RGB)
-    """                        
+    """
 
     metadata = {'render_modes': ['human']}
     """
-    metadata for the environment containing rendering modes, etc 
+    metadata for the environment containing rendering modes, etc
     """
 
     def __init__(self, is_player_1_computer= False, is_player_2_computer= False, render_mode= None):
@@ -70,7 +71,7 @@ class PykachuEnv(gym.Env):
         player1_x = self.physics.player1.x
 
         shaping = 0.0
-        
+
         # Efficiency: tiny step penalty to discourage stalling (further softened).
         shaping -= 0.00005 * (1.0 + min(self._steps_in_rally, 400) / 400.0)
 
@@ -152,7 +153,7 @@ class PykachuEnv(gym.Env):
         # Net-camping penalty: discourage hugging the net when ball is safely on opponent side.
         if ball.x > GROUND_HALF_WIDTH + 10 and ball.expected_landing_x > GROUND_HALF_WIDTH + 20:
             if player1_x > GROUND_HALF_WIDTH - 28:
-                shaping -= 0.1  # stronger deterrent near net
+                shaping -= 0.1  # stronger deterrent near et
                 shaping -= 0.002 * (player1_x - (GROUND_HALF_WIDTH - 28))  # scaled penalty further in
 
         # Jump spam penalty: avoid repeated jumps near net when ball is far away.
@@ -168,7 +169,7 @@ class PykachuEnv(gym.Env):
 
         # Keep shaping bounded so terminal reward dominates.
         shaping = float(np.clip(shaping, -0.15, 0.5))
-        
+
 
         return base + shaping
 
@@ -196,7 +197,7 @@ class PykachuEnv(gym.Env):
                 "dive_direction" : player2.dive_direction,
                 "state": player2.state,
                 "frame_num": player2.frame_num
-            },          
+            },
             "punch": {
                 "visible": ball.punch_effect_radius > 0,
                 "x": ball.punch_effect_x,
@@ -215,7 +216,7 @@ class PykachuEnv(gym.Env):
             "ball": {
                 "x": ball.x,
                 "y": ball.y,
-                "rotation": ball.rotation,                
+                "rotation": ball.rotation,
             },
         }
 
@@ -241,7 +242,7 @@ class PykachuEnv(gym.Env):
                 self.is_player_2_serve = True
             else:#player1 wins
                 self.is_player_2_serve = False
- 
+
         self._steps_in_rally += 1
 
         return self.observation, self.compute_reward(action), self.terminated, self.info
@@ -260,12 +261,12 @@ class PykachuEnv(gym.Env):
 
             elif self.render_mode == "rgb_array":
                 return self.observation
-            
+
         # Draw
         if self.render_mode == 'human':
             pygame.event.pump()
             self.view.draw_background()
-            self.view.draw_players_and_ball(self.physics) 
+            self.view.draw_players_and_ball(self.physics)
             pygame.display.update()
             self._clock.tick(25)
 
@@ -285,4 +286,3 @@ class PykachuEnv(gym.Env):
             self.render()
 
         return self.observation, self.info
-    

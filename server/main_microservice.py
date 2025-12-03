@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
@@ -50,7 +50,7 @@ class PlayerRegistrationRequest(BaseModel):
 class PlayerInputRequest(BaseModel):
     """Request model for player input submission."""
     role: str = Field(pattern="^(player1|player2)$")
-    move: str = Field(pattern="^(left|right|jump|none)$")
+    move: List[int]  # Action array [x, y, power]
 
 
 # ==== Match Implementation ====
@@ -93,9 +93,9 @@ class Match:
         self.latest_payload = self._convert_state_to_payload(game_response["state"])
         self.registered_players: Dict[str, dict] = {}
         self.state_sequence: int = 0
-        self.input_buffer: Dict[str, Tuple[str, float]] = {
-            "player1": ("none", 0.0),
-            "player2": ("none", 0.0)
+        self.input_buffer: Dict[str, Tuple[List[int], float]] = {
+            "player1": ([1, 1, 0], 0.0),  # Default: no action
+            "player2": ([1, 1, 0], 0.0)
         }
 
         self._loop_task = asyncio.create_task(self._run_loop())
@@ -215,16 +215,33 @@ class Match:
             player_info = self.registered_players.pop(role)
             logging.info(f"[REST] Unregistered {role} ({player_info['player_id']}) from match {self.id}")
 
-    async def submit_input(self, role: str, move: str) -> dict:
+    async def submit_input(self, role: str, move: List[int]) -> dict:
         """
         Accept player input and buffer it for next game step.
         Inputs are consumed during _step_game().
-        """
-        if role not in self.registered_players:
-            raise HTTPException(status_code=403, detail="player not registered")
 
-        if move not in {"left", "right", "jump", "none"}:
-            raise HTTPException(status_code=400, detail="invalid move")
+        Args:
+            role: Player role (player1 or player2)
+            move: Action array [x, y, power] where:
+                  - x: 0=left, 1=none, 2=right
+                  - y: 0=none, 1=normal, 2=jump
+                  - power: 0=normal, 1=power hit
+        """
+        # Auto-register if not already registered
+        if role not in self.registered_players:
+            self.registered_players[role] = {
+                "player_id": f"auto_{role}",
+                "registered_at": time.time(),
+                "last_poll": time.time(),
+                "last_input": time.time()
+            }
+
+        # Validate input
+        if len(move) != 3 or not all(isinstance(x, int) for x in move):
+            raise HTTPException(status_code=400, detail="action array must be [x, y, power]")
+
+        # Log received action
+        logging.info(f"[INPUT] {role} action received: {move}")
 
         # Update input buffer
         self.input_buffer[role] = (move, time.time())
@@ -235,24 +252,31 @@ class Match:
             "queued_at": time.time()
         }
 
-    async def get_state(self, role: str, last_seq: Optional[int] = None) -> dict:
+    async def get_state(self, role: Optional[str] = None, last_seq: Optional[int] = None) -> dict:
         """
         Get current game state for polling.
 
         Args:
-            role: Player role requesting state
+            role: Player role requesting state (optional, for tracking purposes only)
             last_seq: Last sequence number client received (for future optimization)
 
         Returns:
-            Current game state with sequence number
+            Current game state with sequence number (same for all players)
         """
-        if role not in self.registered_players:
-            raise HTTPException(status_code=403, detail="player not registered")
+        # Auto-register if role provided and not already registered
+        if role and role not in self.registered_players:
+            self.registered_players[role] = {
+                "player_id": f"auto_{role}",
+                "registered_at": time.time(),
+                "last_poll": time.time(),
+                "last_input": time.time()
+            }
 
-        # Update last poll time (for connection tracking)
-        self.registered_players[role]["last_poll"] = time.time()
+        # Update last poll time if role provided
+        if role and role in self.registered_players:
+            self.registered_players[role]["last_poll"] = time.time()
 
-        # Return latest state
+        # Return latest state (same for all players)
         return {
             **self.latest_payload,
             "sequence": self.state_sequence,
@@ -279,11 +303,17 @@ class Match:
     async def _step_game(self) -> None:
         """Execute one game step via Game Service."""
         # Always use REST input buffer
-        p1_move, _ = self.input_buffer.get("player1", ("none", 0.0))
-        p2_move, _ = self.input_buffer.get("player2", ("none", 0.0))
+        p1_move, _ = self.input_buffer.get("player1", ([1, 1, 0], 0.0))
+        p2_move, _ = self.input_buffer.get("player2", ([1, 1, 0], 0.0))
 
         # Only use p2 action if player2 is registered
         p2_action = p2_move if "player2" in self.registered_players else None
+
+        # Log actions being sent to game service (only when not "none")
+        if p1_move != [1, 1, 0]:
+            logging.debug(f"[STEP] Sending p1_move to game: {p1_move}")
+        if p2_action and p2_action != [1, 1, 0]:
+            logging.debug(f"[STEP] Sending p2_action to game: {p2_action}")
 
         # Call Game Service to step the game
         step_response = self.game_client.step_game(
@@ -299,11 +329,12 @@ class Match:
         if "state" in step_response:
             self.latest_payload = self._convert_state_to_payload(step_response["state"])
 
-        # Auto-reset jump inputs
-        if p1_move == "jump":
-            self.input_buffer["player1"] = ("none", time.time())
-        if p2_action == "jump":
-            self.input_buffer["player2"] = ("none", time.time())
+        # Auto-reset jump inputs (check if y==2)
+        if isinstance(p1_move, list) and len(p1_move) >= 2 and p1_move[1] == 2:
+            self.input_buffer["player1"] = ([1, 1, 0], time.time())  # Reset to "none"
+
+        if isinstance(p2_action, list) and len(p2_action) >= 2 and p2_action[1] == 2:
+            self.input_buffer["player2"] = ([1, 1, 0], time.time())
 
 
 # ==== FastAPI Setup ====
@@ -476,7 +507,7 @@ async def submit_player_input(match_id: str, request: PlayerInputRequest):
 @app.get("/match/{match_id}/state")
 async def get_match_state(
     match_id: str,
-    role: str,
+    role: Optional[str] = None,
     seq: Optional[int] = None,
     response: Response = None
 ):
@@ -484,7 +515,7 @@ async def get_match_state(
     Poll current game state via REST API.
 
     Query Parameters:
-        role: Player role (player1 or player2)
+        role: Player role (optional, for tracking purposes only)
         seq: Last received sequence number (optional, for future optimization)
     """
     match = matches.get(match_id)
