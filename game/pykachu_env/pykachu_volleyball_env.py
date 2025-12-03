@@ -220,9 +220,9 @@ class PykachuEnv(gym.Env):
             },
         }
 
-    def step(self, action):
-        player1_input = UserInput(action)
-        player2_input = UserInput(action)
+    def step(self, player1_action=[1,1,0], player2_action=[1,1,0]):
+        player1_input = UserInput(player1_action)
+        player2_input = UserInput(player2_action)
 
         ball = self.physics.ball
         self._prev_ball_side = "p1_side" if ball.x < GROUND_HALF_WIDTH else "p2_side"
@@ -245,7 +245,7 @@ class PykachuEnv(gym.Env):
 
         self._steps_in_rally += 1
 
-        return self.observation, self.compute_reward(action), self.terminated, self.info
+        return self.observation, self.compute_reward(player1_action), self.terminated, self.info
 
 
     def render(self):
