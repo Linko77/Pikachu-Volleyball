@@ -306,6 +306,15 @@ class Match:
         p1_move, _ = self.input_buffer.get("player1", ([1, 1, 0], 0.0))
         p2_move, _ = self.input_buffer.get("player2", ([1, 1, 0], 0.0))
 
+        # Auto-reset jump inputs IMMEDIATELY after reading (check if y==0)
+        # This prevents the same jump action from being repeated in the next frame
+        # NOTE: y=0 triggers jump (y_direction=-1 after subtracting 1 in physics engine)
+        if isinstance(p1_move, list) and len(p1_move) >= 2 and p1_move[1] == 0:
+            self.input_buffer["player1"] = ([1, 1, 0], time.time())  # Reset to "none"
+
+        if isinstance(p2_move, list) and len(p2_move) >= 2 and p2_move[1] == 0:
+            self.input_buffer["player2"] = ([1, 1, 0], time.time())
+
         # Only use p2 action if player2 is registered
         p2_action = p2_move if "player2" in self.registered_players else None
 
@@ -328,13 +337,6 @@ class Match:
 
         if "state" in step_response:
             self.latest_payload = self._convert_state_to_payload(step_response["state"])
-
-        # Auto-reset jump inputs (check if y==2)
-        if isinstance(p1_move, list) and len(p1_move) >= 2 and p1_move[1] == 2:
-            self.input_buffer["player1"] = ([1, 1, 0], time.time())  # Reset to "none"
-
-        if isinstance(p2_action, list) and len(p2_action) >= 2 and p2_action[1] == 2:
-            self.input_buffer["player2"] = ([1, 1, 0], time.time())
 
 
 # ==== FastAPI Setup ====
