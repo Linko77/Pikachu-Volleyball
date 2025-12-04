@@ -26,7 +26,7 @@ POLL_INTERVAL = 1.0 / 60.0
 
 def atomic_write_json(file_path: Path, data: dict):
     temp_file = file_path.with_suffix('.tmp')
-    with open(temp_file, 'w') as f:
+    with open(temp_file, 'w', encoding="utf-8") as f:
         json.dump(data, f, separators=(',', ':'))
     temp_file.replace(file_path)
 
