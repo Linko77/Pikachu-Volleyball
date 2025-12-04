@@ -123,7 +123,8 @@ def main():
                         # 寫入檔案
                         state_file = DATA_DIR / f"pikachu_state_{match_id}.json"
                         atomic_write_json(state_file, state_data)
-
+                except KeyboardInterrupt:
+                    raise
                 except Exception as e:
                     # 靜默處理錯誤，避免中斷
                     if frame_count % 300 == 0:  # 每 5 秒報告一次錯誤
@@ -155,8 +156,8 @@ def main():
             try:
                 client.disconnect()
                 print(f"[✓] 已關閉: {match_id}")
-            except:
-                pass
+            except Exception as e:
+                print(f"[✗] 關閉失敗 {match_id}: {e}")
 
         # 最終統計
         total_time = time.time() - start_time
