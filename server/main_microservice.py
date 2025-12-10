@@ -6,13 +6,14 @@ instead of directly importing game physics.
 """
 
 import asyncio
+import json
 import logging
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,9 +21,9 @@ from game_service_client import GameServiceClient
 
 # ==== Configuration ====
 
-TICK_RATE = 60.0
+TICK_RATE = 20.0
 STATE_BROADCAST_INTERVAL = 1 / TICK_RATE
-GAME_SERVICE_URL = "http://localhost:8001"  # Game Service endpoint
+GAME_SERVICE_URL = "http://localhost:12346"  # Game Service endpoint
 
 
 # ==== Data Models ====
@@ -98,6 +99,15 @@ class Match:
             "player2": ([1, 1, 0], 0.0)
         }
 
+        # WebSocket 連線管理
+        self.ws_connections: Dict[str, Set[WebSocket]] = {
+            "player1": set(),
+            "player2": set(),
+            "observer": set()  # 只讀觀察者
+        }
+
+        print("ASD")
+        logging.info("ASDSDAKJLASJK")
         self._loop_task = asyncio.create_task(self._run_loop())
 
     def _convert_state_to_payload(self, state: Dict) -> Dict:
@@ -283,6 +293,69 @@ class Match:
             "timestamp": time.time()
         }
 
+    # ---- WebSocket Methods ----
+
+    async def register_ws_connection(self, role: str, websocket: WebSocket):
+        """註冊新的 WebSocket 連線"""
+        if role not in self.ws_connections:
+            self.ws_connections[role] = set()
+
+        self.ws_connections[role].add(websocket)
+        logging.info(f"[WebSocket] {role} connected to match {self.id} (total: {len(self.ws_connections[role])})")
+
+    async def unregister_ws_connection(self, role: str, websocket: WebSocket):
+        """移除 WebSocket 連線"""
+        if role in self.ws_connections:
+            self.ws_connections[role].discard(websocket)
+            logging.info(f"[WebSocket] {role} disconnected from match {self.id} (remaining: {len(self.ws_connections[role])})")
+
+    async def handle_ws_message(self, role: str, message: dict):
+        """處理來自 WebSocket 的訊息"""
+        msg_type = message.get("type")
+
+        if msg_type == "input":
+            # Observer 不能發送輸入
+            if role == "observer":
+                return {
+                    "type": "error",
+                    "message": "observers cannot send input"
+                }
+
+            # 接收玩家輸入
+            move = message.get("move", [1, 1, 0])
+            await self.submit_input(role, move)
+            return None
+
+        elif msg_type == "ping":
+            # 心跳檢查
+            return {"type": "pong", "timestamp": time.time()}
+
+        return None
+
+    async def broadcast_state(self, state: dict):
+        """廣播狀態給所有連線的 WebSocket 客戶端"""
+        if not any(self.ws_connections.values()):
+            # 沒有 WebSocket 連線，不需要廣播
+            return
+
+        message = json.dumps(state)
+
+        # 對所有角色廣播
+        for role, connections in self.ws_connections.items():
+            disconnected = set()
+
+            for ws in connections:
+                try:
+                    await ws.send_text(message)
+                except Exception as e:
+                    # 連線已斷開，標記移除
+                    logging.debug(f"[WebSocket] Failed to send to {role}: {e}")
+                    disconnected.add(ws)
+
+            # 清理斷開的連線
+            for ws in disconnected:
+                connections.discard(ws)
+
     # ---- Game Loop ----
 
     async def _run_loop(self) -> None:
@@ -296,6 +369,7 @@ class Match:
                 self.state_sequence += 1
 
                 elapsed = asyncio.get_event_loop().time() - start
+                print(max(0.0, STATE_BROADCAST_INTERVAL - elapsed))
                 await asyncio.sleep(max(0.0, STATE_BROADCAST_INTERVAL - elapsed))
         except asyncio.CancelledError:
             pass
@@ -337,6 +411,9 @@ class Match:
 
         if "state" in step_response:
             self.latest_payload = self._convert_state_to_payload(step_response["state"])
+
+            # 新增：主動推送狀態給 WebSocket 客戶端
+            await self.broadcast_state(self.latest_payload)
 
 
 # ==== FastAPI Setup ====
@@ -388,6 +465,7 @@ async def system_status():
 async def start_match(payload: MatchStartRequest):
     """Start a new match."""
     match_id = uuid.uuid4().hex[:8]
+    logging.info("ASDSDA")
 
     try:
         match = Match(
@@ -534,6 +612,75 @@ async def get_match_state(
     return state
 
 
+# ==== WebSocket Endpoint ====
+
+@app.websocket("/ws/{match_id}/{role}")
+async def websocket_endpoint(websocket: WebSocket, match_id: str, role: str):
+    """
+    WebSocket 端點：接收玩家輸入，推送遊戲狀態。
+
+    URL: ws://localhost:8000/ws/{match_id}/{role}
+
+    訊息格式：
+    - 接收: {"type": "input", "move": [x, y, power]}
+    - 發送: {"type": "state", "ball": {...}, "score": {...}, ...}
+    """
+    match = matches.get(match_id)
+    if not match:
+        await websocket.close(code=1008, reason="match not found")
+        return
+
+    # 驗證 role
+    if role not in ["player1", "player2", "observer"]:
+        await websocket.close(code=1008, reason="invalid role (must be player1, player2, or observer)")
+        return
+
+    # 接受 WebSocket 連線
+    await websocket.accept()
+    logging.info(f"[WebSocket] Accepted connection from {role} for match {match_id}")
+
+    # 註冊連線
+    await match.register_ws_connection(role, websocket)
+
+    try:
+        # 立即發送當前狀態
+        initial_state = {
+            **match.latest_payload,
+            "sequence": match.state_sequence,
+            "timestamp": time.time()
+        }
+        await websocket.send_text(json.dumps(initial_state))
+
+        # 持續接收訊息
+        while True:
+            # 接收 JSON 訊息
+            data = await websocket.receive_text()
+
+            try:
+                message = json.loads(data)
+                response = await match.handle_ws_message(role, message)
+
+                # 如果有回應（例如 pong），發送回去
+                if response:
+                    await websocket.send_text(json.dumps(response))
+
+            except json.JSONDecodeError:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "invalid JSON"
+                }))
+
+    except WebSocketDisconnect:
+        logging.info(f"[WebSocket] {role} disconnected from match {match_id}")
+
+    except Exception as e:
+        logging.error(f"[WebSocket] Error for {role} in match {match_id}: {e}")
+
+    finally:
+        # 移除連線
+        await match.unregister_ws_connection(role, websocket)
+
+
 def main():
     """Run the match server."""
     # Configure logging
@@ -556,7 +703,7 @@ def main():
     uvicorn.run(
         "main_microservice:app",
         host="0.0.0.0",
-        port=8000,
+        port=12345,
         reload=False,
         log_level="info"
     )

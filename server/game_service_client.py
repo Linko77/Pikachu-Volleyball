@@ -5,14 +5,15 @@ This module provides a clean interface for the Match server to interact
 with the Game Service microservice.
 """
 
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 import requests
 
 
 class GameServiceClient:
     """Client for Game Service HTTP API."""
 
-    def __init__(self, base_url: str = "http://localhost:8001"):
+    def __init__(self, base_url: str = "http://localhost:12346"):
         """
         Initialize Game Service client.
 

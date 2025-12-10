@@ -20,7 +20,6 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from posix import PRIO_DARWIN_BG
 from typing import List, Optional, Union, final
 
 import uvicorn
@@ -75,9 +74,9 @@ class GameState:
 class GameInstance:
     """Manages a single game instance."""
 
-    # Frame rate limiting: 25 FPS = 0.04 seconds per frame
-    TARGET_FPS = 25
-    FRAME_TIME = 1.0 / TARGET_FPS  # 0.04 seconds
+    # Frame rate limiting: 20 FPS = 0.05 seconds per frame
+    TARGET_FPS = 20
+    FRAME_TIME = 1.0 / TARGET_FPS  # 0.05 seconds
 
     def __init__(self, game_id: str, mode: str = "pvai"):
         self.game_id = game_id
@@ -113,7 +112,7 @@ class GameInstance:
 
     def step(self, p1_action: List[int], p2_action: Optional[List[int]] = None) -> GameState:
         """
-        Execute one game step with 25 FPS frame rate limiting.
+        Execute one game step with 20 FPS frame rate limiting.
 
         Args:
             p1_action: Player 1 action array [x, y, power]
@@ -122,16 +121,14 @@ class GameInstance:
         Returns:
             Current game state
         """
-        # Enforce 25 FPS frame rate limiting
+        # Enforce 20 FPS frame rate limiting
         current_time = time.time()
         elapsed = current_time - self.last_step_time
 
-        """
         if elapsed < self.FRAME_TIME:
-            # Sleep to maintain 25 FPS
+            # Sleep to maintain 30 FPS
             sleep_time = self.FRAME_TIME - elapsed
             time.sleep(sleep_time)
-        """
 
         # Update last step time
         self.last_step_time = time.time()
@@ -242,7 +239,7 @@ def read_match_id() -> Optional[str]:
 
 def action_reader_loop():
     """
-    Background thread that reads actions from actions.txt at 25 FPS.
+    Background thread that reads actions from actions.txt at 30 FPS.
 
     File format: player_id, x, y, power
     Example: player1, 0, 1, 0
@@ -251,7 +248,7 @@ def action_reader_loop():
     """
     global action_reader_running
 
-    logging.info("[ACTION_READER] Started at 25 FPS")
+    logging.info("[ACTION_READER] Started at 30 FPS")
 
     # 讀取 match ID
     match_id = read_match_id()
@@ -264,7 +261,7 @@ def action_reader_loop():
     while action_reader_running:
         try:
             if not ACTIONS_FILE.exists():
-                time.sleep(0.04)  # 25 FPS = 0.04s per frame
+                time.sleep(0.0333)  # 30 FPS = 0.0333s per frame
                 continue
 
             # Read all lines from file
@@ -272,7 +269,7 @@ def action_reader_loop():
                 lines = f.readlines()
 
             if not lines:
-                time.sleep(0.04)
+                time.sleep(0.0333)
                 continue
 
             # Process first line
@@ -321,12 +318,12 @@ def action_reader_loop():
                     with open(ACTIONS_FILE, 'w') as f:
                         f.writelines(lines[1:])
 
-            # Wait for next frame (25 FPS)
-            time.sleep(0.04)
+            # Wait for next frame (30 FPS)
+            time.sleep(0.0333)
 
         except Exception as e:
             logging.error(f"[ACTION_READER] Error: {e}")
-            time.sleep(0.04)
+            time.sleep(0.0333)
 
     logging.info("[ACTION_READER] Stopped")
 
@@ -446,7 +443,7 @@ async def list_games():
 async def start_action_reader():
     """
     Start the action reader background thread.
-    Reads actions from data/actions.txt at 25 FPS.
+    Reads actions from data/actions.txt at 30 FPS.
     """
     global action_reader_running, action_reader_thread
 
@@ -518,7 +515,7 @@ def main():
     uvicorn.run(
         "game_server:app",
         host="0.0.0.0",
-        port=8001,
+        port=12346,
         reload=False,
         log_level="info"
     )
