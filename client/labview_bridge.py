@@ -34,14 +34,14 @@ from typing import Optional
 import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
-from game_client import GameClient, health_check, _load_game_service_url
-from lv_ws_client import WebSocketClient
+from game_client import GameClient, health_check
+from lv_ws_client import WebSocketClient, _load_match_server_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE_DIR / "data" / "match_id.txt"
 DATA_DIR = BASE_DIR / "data"
 ACTIONS_FILE = DATA_DIR / "actions.txt"
-POLL_INTERVAL = 1.0 / 20.0  # 20 FPS
+POLL_INTERVAL = 1.0 / 10.0  # 10 FPS
 
 
 class LabVIEWBridge:
@@ -55,7 +55,7 @@ class LabVIEWBridge:
         self.frame_count = 0
         self.start_time = time.time()
         self.last_result_position = 0  # 追踪已读取的结果位置
-        self.game_service_url = _load_game_service_url()
+        self.match_server_url = _load_match_server_url()
 
         # 確保目錄存在
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,33 +88,22 @@ class LabVIEWBridge:
         # 創建 WebSocket 客戶端（讀取狀態）
         self.ws_client = WebSocketClient()
         if self.ws_client.connect(match_id, role="player2"):
-            print(f"  ✓ WebSocket 連線成功")
+            print(f"  ✓ WebSocket 連線成功（從 Match Server）")
         else:
             print(f"  ✗ WebSocket 連線失敗")
             return False
 
-        # 檢查遊戲是否存在
+        # 檢查 Match 是否存在
         try:
-            url = f"{self.game_service_url}/game/{match_id}/state"
+            url = f"{self.match_server_url}/match/{match_id}/status"
             response = requests.get(url, timeout=2.0)
             if response.status_code == 200:
-                print(f"  ✓ 遊戲已存在")
-            elif response.status_code == 404:
-                print(f"  ⚠ 遊戲不存在，正在創建...")
-                # 創建遊戲
-                create_url = f"{self.game_service_url}/game/create"
-                response = requests.post(
-                    create_url,
-                    json={"game_id": match_id, "mode": "pvai"},
-                    timeout=2.0
-                )
-                if response.status_code == 200:
-                    print(f"  ✓ 遊戲創建成功")
-                else:
-                    print(f"  ✗ 遊戲創建失敗")
-                    return False
+                status = response.json()
+                print(f"  ✓ Match 已存在 (mode: {status.get('mode', 'unknown')})")
+            else:
+                print(f"  ⚠ Match 可能不存在，但可以繼續運行")
         except Exception as e:
-            print(f"  ⚠ 無法確認遊戲狀態: {e}")
+            print(f"  ⚠ 無法確認 Match 狀態: {e}")
 
         self.match_id = match_id
         return True
@@ -172,7 +161,7 @@ class LabVIEWBridge:
             pass  # 靜默處理錯誤
 
     def process_actions(self):
-        """處理本地 actions.txt 並透過 HTTP 發送到遠端伺服器"""
+        """處理本地 actions.txt 並透過 HTTP 發送到 Match Server（會被緩衝到 20 FPS）"""
         if not ACTIONS_FILE.exists():
             return
 
@@ -194,25 +183,21 @@ class LabVIEWBridge:
                         player_id = parts[0]
                         x, y, power = int(parts[1]), int(parts[2]), int(parts[3])
 
-                        # 透過 HTTP 發送
-                        url = f"{self.game_service_url}/game/{self.match_id}/step"
+                        # 發送到 Match Server（會被緩衝）
+                        # Match Server 會以固定 20 FPS 傳送給 Game Service
+                        role = player_id  # "player1" or "player2"
+                        url = f"{self.match_server_url}/match/{self.match_id}/input"
                         response = requests.post(
                             url,
-                            json={"p1_action": [x, y, power]},
+                            json={"role": role, "move": [x, y, power]},
                             timeout=2.0
                         )
 
                         if response.status_code == 200:
                             result = response.json()
-                            state = result.get("state", {})
-                            ball = state.get("ball", {})
-                            score_p1 = state.get("score_p1", 0)
-                            score_p2 = state.get("score_p2", 0)
-                            terminated = state.get("terminated", False)
-
-                            # 打印 action 結果
-                            status = "⚠ Ball Down!" if terminated else "✓"
-                            print(f"  [ACTION] {player_id} {[x, y, power]} → Ball({ball.get('x', 0):.0f},{ball.get('y', 0):.0f}) Score {score_p1}:{score_p2} {status}")
+                            if result.get("result") == "accepted":
+                                # 打印確認
+                                print(f"  [ACTION] {player_id} {[x, y, power]} → 已緩衝，等待 20 FPS 傳送")
                         else:
                             print(f"  [ACTION] ✗ 發送失敗: {response.status_code}")
 
@@ -247,8 +232,8 @@ class LabVIEWBridge:
                 state_file = DATA_DIR / f"pikachu_state_{self.match_id}.json"
                 self.atomic_write_json(state_file, state_data)
 
-                # 每秒打印一次状态（20 FPS × 1 秒 = 20 frames）
-                if self.frame_count % 20 == 0:
+                # 每秒打印一次状态（10 FPS × 1 秒 = 10 frames）
+                if self.frame_count % 10 == 0:
                     try:
                         ball = state_data.get('ball', {})
                         ball_pos = f"Ball({ball.get('x', 0):.0f},{ball.get('y', 0):.0f})"
@@ -268,7 +253,6 @@ class LabVIEWBridge:
     def run(self):
         """主循環"""
         # 获取配置信息
-        from game_client import _default_game_service_url
         from lv_ws_client import _server_base_url
 
         print("=" * 60)
@@ -277,11 +261,10 @@ class LabVIEWBridge:
         print(f"配置文件: {CONFIG_FILE}")
         print(f"數據目錄: {DATA_DIR}")
         print(f"Match Server: {_server_base_url}")
-        print(f"Game Service: {_default_game_service_url}")
         print("-" * 60)
         print(f"狀態輸出: data/pikachu_state_{{match_id}}.json")
         print(f"Action 輸入: data/actions.txt")
-        print(f"Action 輸出: data/action_results.txt")
+        print(f"架構: LabVIEW → Match Server (緩衝) → Game Service (20 FPS)")
         print("=" * 60)
         print()
 
@@ -315,8 +298,8 @@ class LabVIEWBridge:
             while self.running:
                 loop_start = time.time()
 
-                # 每 2 秒檢查配置文件是否改變（20 FPS × 2 秒 = 40 frames）
-                if self.frame_count % 40 == 0:
+                # 每 2 秒檢查配置文件是否改變（10 FPS × 2 秒 = 20 frames）
+                if self.frame_count % 20 == 0:
                     current_config = self.read_config()
                     if current_config and current_config != self.match_id:
                         print(f"\n[!] 檢測到 Match ID 變更: {self.match_id} → {current_config}")
@@ -338,8 +321,8 @@ class LabVIEWBridge:
 
                 self.frame_count += 1
 
-                # 每 10 秒報告統計（20 FPS × 10 秒 = 200 frames）
-                if self.frame_count % 200 == 0:
+                # 每 10 秒報告統計（10 FPS × 10 秒 = 100 frames）
+                if self.frame_count % 100 == 0:
                     elapsed = time.time() - self.start_time
                     fps = self.frame_count / elapsed if elapsed > 0 else 0
                     connected = self.ws_client.connected if self.ws_client else False
