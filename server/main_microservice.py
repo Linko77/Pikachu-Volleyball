@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from typing import Dict, List, Optional, Set, Tuple, Union
+from venv import logger
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
@@ -107,7 +108,7 @@ class Match:
         }
 
         print("ASD")
-        logging.info("ASDSDAKJLASJK")
+        logging.info("start loop")
         self._loop_task = asyncio.create_task(self._run_loop())
 
     def _convert_state_to_payload(self, state: Dict) -> Dict:
@@ -255,6 +256,7 @@ class Match:
 
         # Update input buffer
         self.input_buffer[role] = (move, time.time())
+        print("Receive Action")
         self.registered_players[role]["last_input"] = time.time()
 
         return {
@@ -340,6 +342,7 @@ class Match:
 
         message = json.dumps(state)
 
+        logging.info("Broadcasting")
         # 對所有角色廣播
         for role, connections in self.ws_connections.items():
             disconnected = set()
@@ -362,6 +365,7 @@ class Match:
         """Main game loop that steps the game at 60 FPS."""
         try:
             while self.running:
+                print("A FHKJSDFKSHFKSJHFLKJDHFKJSH")
                 start = asyncio.get_event_loop().time()
                 await self._step_game()
 
@@ -371,7 +375,11 @@ class Match:
                 elapsed = asyncio.get_event_loop().time() - start
                 print(max(0.0, STATE_BROADCAST_INTERVAL - elapsed))
                 await asyncio.sleep(max(0.0, STATE_BROADCAST_INTERVAL - elapsed))
-        except asyncio.CancelledError:
+
+            print("C FHKJSDFKSHFKSJHFLKJDHFKJSH")
+        except asyncio.CancelledError as e:
+            print(e)
+            print("D FHKJSDFKSHFKSJHFLKJDHFKJSH")
             pass
 
     async def _step_game(self) -> None:
@@ -399,6 +407,8 @@ class Match:
             logging.debug(f"[STEP] Sending p2_action to game: {p2_action}")
 
         # Call Game Service to step the game
+
+        """
         step_response = self.game_client.step_game(
             self.game_id,
             p1_move,
@@ -408,12 +418,15 @@ class Match:
         if "error" in step_response:
             print(f"Game step error: {step_response['error']}")
             return
+            """
+        st = self.game_client.get_state(self.game_id)
+        print(st)
+        self.latest_payload = self._convert_state_to_payload(st["state"])
+        print("B FHKJSDFKSHFKSJHFLKJDHFKJSH")
+        print(self.latest_payload)
 
-        if "state" in step_response:
-            self.latest_payload = self._convert_state_to_payload(step_response["state"])
-
-            # 新增：主動推送狀態給 WebSocket 客戶端
-            await self.broadcast_state(self.latest_payload)
+        # 新增：主動推送狀態給 WebSocket 客戶端
+        await self.broadcast_state(self.latest_payload)
 
 
 # ==== FastAPI Setup ====
@@ -581,6 +594,7 @@ async def submit_player_input(match_id: str, request: PlayerInputRequest):
         raise HTTPException(status_code=404, detail="match not found")
 
     result = await match.submit_input(request.role, request.move)
+    logging.info("/match/{match_id}/input called")
     return result
 
 
