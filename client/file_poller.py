@@ -53,11 +53,14 @@ def read_config() -> list:
 
 
 def main():
+    from lv_ws_client import _server_base_url
+
     print("=" * 60)
     print("WebSocket File Poller - 流式推送模式")
     print("=" * 60)
     print(f"Config File: {CONFIG_FILE}")
     print(f"Output Dir: {DATA_DIR}")
+    print(f"Match Server: {_server_base_url}")
     print(f"Mode: WebSocket Push (無 HTTP RTT 延遲)")
     print("=" * 60)
 

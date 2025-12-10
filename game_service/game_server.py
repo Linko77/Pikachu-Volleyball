@@ -15,9 +15,12 @@ Architecture:
 import logging
 import os
 import sys
+import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from posix import PRIO_DARWIN_BG
 from typing import List, Optional, Union, final
 
 import uvicorn
@@ -72,18 +75,23 @@ class GameState:
 class GameInstance:
     """Manages a single game instance."""
 
+    # Frame rate limiting: 25 FPS = 0.04 seconds per frame
+    TARGET_FPS = 25
+    FRAME_TIME = 1.0 / TARGET_FPS  # 0.04 seconds
+
     def __init__(self, game_id: str, mode: str = "pvai"):
         self.game_id = game_id
         self.mode = mode
         self.score_p1 = 0
         self.score_p2 = 0
+        self.last_step_time = time.time()
 
         # Create Gymnasium environment
         is_p2_ai = (mode == "pvai")
         self.env = PykachuEnv(
             is_player_1_computer=False,
             is_player_2_computer=is_p2_ai,
-            render_mode=None
+            render_mode="human"
         )
 
         # Reset environment
@@ -105,7 +113,7 @@ class GameInstance:
 
     def step(self, p1_action: List[int], p2_action: Optional[List[int]] = None) -> GameState:
         """
-        Execute one game step.
+        Execute one game step with 25 FPS frame rate limiting.
 
         Args:
             p1_action: Player 1 action array [x, y, power]
@@ -114,6 +122,20 @@ class GameInstance:
         Returns:
             Current game state
         """
+        # Enforce 25 FPS frame rate limiting
+        current_time = time.time()
+        elapsed = current_time - self.last_step_time
+
+        """
+        if elapsed < self.FRAME_TIME:
+            # Sleep to maintain 25 FPS
+            sleep_time = self.FRAME_TIME - elapsed
+            time.sleep(sleep_time)
+        """
+
+        # Update last step time
+        self.last_step_time = time.time()
+
         # Use the provided action array directly
         action = p1_action
 
@@ -196,6 +218,118 @@ app.add_middleware(
 # Global game instances storage
 games: dict[str, GameInstance] = {}
 
+# Action reader state
+action_reader_running = False
+action_reader_thread = None
+ACTIONS_FILE = Path(__file__).parent.parent / "data" / "actions.txt"
+RESULTS_FILE = Path(__file__).parent.parent / "data" / "action_results.txt"
+MATCH_ID_FILE = Path(__file__).parent.parent / "data" / "match_id.txt"
+
+
+def read_match_id() -> Optional[str]:
+    """讀取配置文件中的 match ID"""
+    if not MATCH_ID_FILE.exists():
+        return None
+    try:
+        with open(MATCH_ID_FILE) as f:
+            line = f.readline().strip()
+            if line and not line.startswith('#'):
+                return line
+    except Exception:
+        pass
+    return None
+
+
+def action_reader_loop():
+    """
+    Background thread that reads actions from actions.txt at 25 FPS.
+
+    File format: player_id, x, y, power
+    Example: player1, 0, 1, 0
+
+    Match ID is read from data/match_id.txt
+    """
+    global action_reader_running
+
+    logging.info("[ACTION_READER] Started at 25 FPS")
+
+    # 讀取 match ID
+    match_id = read_match_id()
+    if not match_id:
+        logging.error("[ACTION_READER] No match_id found in data/match_id.txt")
+        return
+
+    logging.info(f"[ACTION_READER] Using match_id: {match_id}")
+
+    while action_reader_running:
+        try:
+            if not ACTIONS_FILE.exists():
+                time.sleep(0.04)  # 25 FPS = 0.04s per frame
+                continue
+
+            # Read all lines from file
+            with open(ACTIONS_FILE, 'r') as f:
+                lines = f.readlines()
+
+            if not lines:
+                time.sleep(0.04)
+                continue
+
+            # Process first line
+            line = lines[0].strip()
+            if line:
+                try:
+                    # Parse: player_id, x, y, power
+                    parts = [p.strip() for p in line.split(',')]
+                    if len(parts) >= 4:
+                        player_id = parts[0]
+                        x, y, power = int(parts[1]), int(parts[2]), int(parts[3])
+
+                        # Execute action
+                        game = games.get(match_id)
+                        if game:
+                            action = [x, y, power]
+                            logging.info(f"[ACTION_READER] {match_id} ({player_id}): {action}")
+
+                            # Execute step and get result
+                            state = game.step(action)
+
+                            # Write result to output file
+                            result_line = (
+                                f"{match_id},{player_id},"
+                                f"{state.ball['x']:.2f},{state.ball['y']:.2f},"
+                                f"{state.p1['x']:.2f},{state.p1['y']:.2f},"
+                                f"{state.p2['x']:.2f},{state.p2['y']:.2f},"
+                                f"{state.score_p1},{state.score_p2},"
+                                f"{int(state.terminated)}\n"
+                            )
+
+                            with open(RESULTS_FILE, 'a') as f:
+                                f.write(result_line)
+
+                            logging.info(f"[ACTION_READER] Result: ball({state.ball['x']:.1f},{state.ball['y']:.1f}) score={state.score_p1}:{state.score_p2}")
+                        else:
+                            logging.warning(f"[ACTION_READER] Game {match_id} not found")
+
+                    # Remove processed line
+                    with open(ACTIONS_FILE, 'w') as f:
+                        f.writelines(lines[1:])
+
+                except (ValueError, IndexError) as e:
+                    logging.error(f"[ACTION_READER] Parse error: {line} - {e}")
+                    # Remove bad line
+                    with open(ACTIONS_FILE, 'w') as f:
+                        f.writelines(lines[1:])
+
+            # Wait for next frame (25 FPS)
+            time.sleep(0.04)
+
+        except Exception as e:
+            logging.error(f"[ACTION_READER] Error: {e}")
+            time.sleep(0.04)
+
+    logging.info("[ACTION_READER] Stopped")
+
 
 @app.get("/health")
 async def health():
@@ -205,6 +339,7 @@ async def health():
         "service": "game-service",
         "version": "1.0",
         "active_games": len(games),
+        "action_reader_running": action_reader_running,
     }
 
 
@@ -305,6 +440,64 @@ async def list_games():
             for gid, game in games.items()
         ]
     }
+
+
+@app.post("/action-reader/start")
+async def start_action_reader():
+    """
+    Start the action reader background thread.
+    Reads actions from data/actions.txt at 25 FPS.
+    """
+    global action_reader_running, action_reader_thread
+
+    if action_reader_running:
+        return {"status": "already_running"}
+
+    action_reader_running = True
+    action_reader_thread = threading.Thread(target=action_reader_loop, daemon=True)
+    action_reader_thread.start()
+
+    return {
+        "status": "started",
+        "fps": 25,
+        "file": str(ACTIONS_FILE),
+    }
+
+
+@app.post("/action-reader/stop")
+async def stop_action_reader():
+    """Stop the action reader background thread."""
+    global action_reader_running
+
+    if not action_reader_running:
+        return {"status": "not_running"}
+
+    action_reader_running = False
+    return {"status": "stopped"}
+
+
+@app.get("/action-reader/status")
+async def action_reader_status():
+    """Get action reader status."""
+    return {
+        "running": action_reader_running,
+        "input_file": str(ACTIONS_FILE),
+        "input_file_exists": ACTIONS_FILE.exists(),
+        "output_file": str(RESULTS_FILE),
+        "output_file_exists": RESULTS_FILE.exists(),
+        "fps": 25,
+    }
+
+
+@app.post("/action-reader/clear-results")
+async def clear_results():
+    """Clear the action results file."""
+    try:
+        if RESULTS_FILE.exists():
+            RESULTS_FILE.unlink()
+        return {"status": "cleared", "file": str(RESULTS_FILE)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def main():
