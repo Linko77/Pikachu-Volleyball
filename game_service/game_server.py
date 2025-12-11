@@ -54,7 +54,7 @@ class PPOAgent:
     def __init__(self, model_path: Optional[str] = None):
         """Initialize PPO agent with trained model"""
         if model_path is None:
-            model_path = str(game_dir / "checkpoints" / "ppo_pykachu_update_100.pt")
+            model_path = str(game_dir / "checkpoints" / "ppo_pykachu.pt")
 
         self.model_path = model_path
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -156,7 +156,7 @@ class GameInstance:
         self.last_step_time = time.time()
 
         # Create Gymnasium environment
-        is_p1_ai = (mode == "aivai")  # Player 1 is AI in aivai mode
+        is_p1_ai = False  # Player 1 is AI in aivai mode
         is_p2_ai = (mode == "pvai" or mode == "aivai")  # Player 2 is AI in both pvai and aivai
 
         self.env = PykachuEnv(
