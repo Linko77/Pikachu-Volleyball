@@ -35,13 +35,33 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 from game_client import GameClient, health_check
-from lv_ws_client import WebSocketClient, _load_match_server_url
+from lv_ws_client import WebSocketClient, _server_base_url
 
+# ============================================================
+# 配置區域 - 在這裡修改所有設定
+# ============================================================
+
+# 更新頻率設定
+POLL_FPS = 60.0                          # 輪詢頻率 (FPS)
+POLL_INTERVAL = 1.0 / POLL_FPS           # 自動計算間隔時間
+
+# 路徑設定
 BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_FILE = BASE_DIR / "data" / "match_id.txt"
-DATA_DIR = BASE_DIR / "data"
-ACTIONS_FILE = DATA_DIR / "actions.txt"
-POLL_INTERVAL = 1.0 / 10.0  # 10 FPS
+DATA_DIR = BASE_DIR / "data"             # 資料目錄
+CONFIG_FILE = DATA_DIR / "match_id.txt"  # Match ID 配置文件
+ACTIONS_FILE = DATA_DIR / "actions.txt"  # Actions 輸入文件
+
+# 狀態顯示設定
+STATS_PRINT_INTERVAL = 10.0              # 每 N 秒打印一次統計 (秒)
+STATE_PRINT_INTERVAL = 1.0               # 每 N 秒打印一次狀態 (秒)
+CONFIG_CHECK_INTERVAL = 2.0              # 每 N 秒檢查配置文件 (秒)
+
+# WebSocket 設定
+WEBSOCKET_ROLE = "player2"               # WebSocket 連接角色 (player1/player2)
+
+# ============================================================
+# 以下為程式碼，通常不需要修改
+# ============================================================
 
 
 class LabVIEWBridge:
@@ -55,7 +75,7 @@ class LabVIEWBridge:
         self.frame_count = 0
         self.start_time = time.time()
         self.last_result_position = 0  # 追踪已读取的结果位置
-        self.match_server_url = _load_match_server_url()
+        self.match_server_url = _server_base_url
 
         # 確保目錄存在
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,8 +107,8 @@ class LabVIEWBridge:
 
         # 創建 WebSocket 客戶端（讀取狀態）
         self.ws_client = WebSocketClient()
-        if self.ws_client.connect(match_id, role="player2"):
-            print(f"  ✓ WebSocket 連線成功（從 Match Server）")
+        if self.ws_client.connect(match_id, role=WEBSOCKET_ROLE):
+            print(f"  ✓ WebSocket 連線成功（從 Match Server，角色: {WEBSOCKET_ROLE}）")
         else:
             print(f"  ✗ WebSocket 連線失敗")
             return False
@@ -232,15 +252,16 @@ class LabVIEWBridge:
                 state_file = DATA_DIR / f"pikachu_state_{self.match_id}.json"
                 self.atomic_write_json(state_file, state_data)
 
-                # 每秒打印一次状态（10 FPS × 1 秒 = 10 frames）
-                if self.frame_count % 10 == 0:
+                # 定期打印狀態
+                if self.frame_count % int(POLL_FPS * STATE_PRINT_INTERVAL) == 0:
                     try:
                         ball = state_data.get('ball', {})
                         ball_pos = f"Ball({ball.get('x', 0):.0f},{ball.get('y', 0):.0f})"
-                        score_p1 = state_data.get('score_p1', 0)
-                        score_p2 = state_data.get('score_p2', 0)
-                        score = f"Score {score_p1}:{score_p2}"
-                        print(f"[{self.match_id}] {ball_pos} {score}")
+                        score = state_data.get('score', {})
+                        score_p1 = score.get('p1', 0)
+                        score_p2 = score.get('p2', 0)
+                        score_str = f"Score {score_p1}:{score_p2}"
+                        print(f"[{self.match_id}] {ball_pos} {score_str}")
                     except Exception:
                         pass  # 如果格式不對，跳過這次打印
             # 如果 state_json 是 None，不打印任何东西
@@ -252,9 +273,6 @@ class LabVIEWBridge:
 
     def run(self):
         """主循環"""
-        # 获取配置信息
-        from lv_ws_client import _server_base_url
-
         print("=" * 60)
         print("LabVIEW Bridge - 統一狀態截取與 Action 處理")
         print("=" * 60)
@@ -262,9 +280,15 @@ class LabVIEWBridge:
         print(f"數據目錄: {DATA_DIR}")
         print(f"Match Server: {_server_base_url}")
         print("-" * 60)
+        print(f"輪詢頻率: {POLL_FPS} FPS")
+        print(f"WebSocket 角色: {WEBSOCKET_ROLE}")
+        print(f"狀態打印間隔: {STATE_PRINT_INTERVAL} 秒")
+        print(f"統計打印間隔: {STATS_PRINT_INTERVAL} 秒")
+        print(f"配置檢查間隔: {CONFIG_CHECK_INTERVAL} 秒")
+        print("-" * 60)
         print(f"狀態輸出: data/pikachu_state_{{match_id}}.json")
         print(f"Action 輸入: data/actions.txt")
-        print(f"架構: LabVIEW → Match Server (緩衝) → Game Service (20 FPS)")
+        print(f"架構: LabVIEW → Match Server (緩衝) → Game Service")
         print("=" * 60)
         print()
 
@@ -279,7 +303,7 @@ class LabVIEWBridge:
 
                 if not config_match_id:
                     print("等待配置... (請在 data/match_id.txt 中添加 match ID)")
-                    time.sleep(2.0)
+                    time.sleep(0.5)
                     continue
 
                 # 嘗試設置 match
@@ -287,7 +311,7 @@ class LabVIEWBridge:
                     setup_success = True
                 else:
                     print("設置失敗，2 秒後重試...")
-                    time.sleep(2.0)
+                    time.sleep(0.5)
 
             if not self.running:
                 return
@@ -298,8 +322,8 @@ class LabVIEWBridge:
             while self.running:
                 loop_start = time.time()
 
-                # 每 2 秒檢查配置文件是否改變（10 FPS × 2 秒 = 20 frames）
-                if self.frame_count % 20 == 0:
+                # 定期檢查配置文件是否改變
+                if self.frame_count % int(POLL_FPS * CONFIG_CHECK_INTERVAL) == 0:
                     current_config = self.read_config()
                     if current_config and current_config != self.match_id:
                         print(f"\n[!] 檢測到 Match ID 變更: {self.match_id} → {current_config}")
@@ -321,8 +345,8 @@ class LabVIEWBridge:
 
                 self.frame_count += 1
 
-                # 每 10 秒報告統計（10 FPS × 10 秒 = 100 frames）
-                if self.frame_count % 100 == 0:
+                # 定期報告統計
+                if self.frame_count % int(POLL_FPS * STATS_PRINT_INTERVAL) == 0:
                     elapsed = time.time() - self.start_time
                     fps = self.frame_count / elapsed if elapsed > 0 else 0
                     connected = self.ws_client.connected if self.ws_client else False
