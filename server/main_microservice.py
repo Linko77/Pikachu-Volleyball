@@ -30,7 +30,7 @@ GAME_SERVICE_URL = "http://localhost:12346"  # Game Service endpoint
 # ==== Data Models ====
 
 class MatchStartRequest(BaseModel):
-    mode: str = Field(pattern="^(pvp|pvai)$")
+    mode: str = Field(pattern="^(pvp|pvai|aivai)$")
     player_id: str
     player_name: Optional[str] = None
 
