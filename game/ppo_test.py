@@ -9,10 +9,10 @@ from collections import deque
 
 pygame.init()
 
-MODEL_PATH = "checkpoints/ppo_pykachu_update_50.pt"  # change to a specific checkpoint if desired
+MODEL_PATH = "checkpoints/ppo_pykachu_update_100.pt"  # change to a specific checkpoint if desired
 ACTION_REPEAT_TEST = 1  # smaller repeat to slow down play
 
-env = gym.make("PykachuVolleyball-v0", render_mode="human", is_player_1_computer=False, is_player_2_computer=True)
+env = pykachu_env.PykachuEnv(render_mode='human', is_player_1_computer=False, is_player_2_computer=True)
 reset_result = env.reset()
 if isinstance(reset_result, tuple):
     obs_env, _ = reset_result

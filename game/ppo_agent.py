@@ -19,18 +19,18 @@ ENV_ID = 'PykachuVolleyball-v0'  # adjust if your env id is different
 ACTION_DIMS = [3, 3, 2]          # MultiDiscrete([3, 3, 2])
 DOWNSAMPLED_SHAPE = (160, 120)   # (H, W) after downsampling
 FRAME_STACK = 3                  # how many recent frames to stack (channel-wise)
-ACTION_REPEAT = 2                # repeat each action this many env steps
+ACTION_REPEAT = 1                # repeat each action this many env steps
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-TOTAL_UPDATES    = 250          # how many PPO updates
+TOTAL_UPDATES    = 500          # how many PPO updates
 ROLLOUT_STEPS    = 2048          # steps per rollout
 GAMMA            = 0.995
 GAE_LAMBDA       = 0.95
 PPO_EPOCHS       = 4
 MINIBATCH_SIZE   = 1024
 CLIP_EPS         = 0.1
-LR_START         = 3e-4
+LR_START         = 1e-3
 LR_END           = 5e-5
 LR_DECAY_K       = 0.5           # unused when linear
 VF_COEF          = 0.5
@@ -226,7 +226,7 @@ def train():
 
     # Create env (for training, do NOT render to save time)
     # If your env is older Gym, it probably uses obs = env.reset()
-    env = gym.make(ENV_ID, render_mode=None, is_player_2_computer=True)
+    env = pykachu_env.PykachuEnv( is_player_1_computer=False, is_player_2_computer=True)
 
     # Handle old vs new reset API:
     reset_result = env.reset()
