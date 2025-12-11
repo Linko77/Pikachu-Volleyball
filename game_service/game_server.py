@@ -18,10 +18,13 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Optional, Union, final
 
+import numpy as np
+import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,16 +39,83 @@ original_cwd = os.getcwd()
 os.chdir(game_dir)
 
 try:
+    import ppo_agent  # Import PPO agent for AI mode
+
     from pykachu_env import PykachuEnv
 finally:
     os.chdir(original_cwd)
+
+
+# ==== PPO AI Wrapper ====
+
+class PPOAgent:
+    """Wrapper for PPO AI agent"""
+
+    def __init__(self, model_path: Optional[str] = None):
+        """Initialize PPO agent with trained model"""
+        if model_path is None:
+            model_path = str(game_dir / "checkpoints" / "ppo_pykachu_update_100.pt")
+
+        self.model_path = model_path
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Initialize agent
+        self.agent = ppo_agent.PikachuPPO(
+            ppo_agent.ACTION_DIMS,
+            input_channels=3 * ppo_agent.FRAME_STACK
+        ).to(self.device)
+
+        # Load trained weights
+        self.agent.load_state_dict(
+            torch.load(model_path, map_location=self.device, weights_only=True)
+        )
+        self.agent.eval()
+
+        logging.info(f"[AI] PPO agent loaded from {model_path}")
+
+    def create_frame_stack(self):
+        """Create a new frame stack for a game instance"""
+        frames = deque(maxlen=ppo_agent.FRAME_STACK)
+        # Initialize with empty frames
+        dummy_frame = np.zeros((*ppo_agent.DOWNSAMPLED_SHAPE, 3), dtype=np.uint8)
+        for _ in range(ppo_agent.FRAME_STACK):
+            frames.append(dummy_frame)
+        return frames
+
+    def get_action(self, obs_env, frames: deque) -> List[int]:
+        """Get action from PPO agent for given observation"""
+        # Update frame stack
+        obs_frame = ppo_agent.downsample_obs(obs_env)
+        frames.append(obs_frame)
+
+        # Stack frames
+        stacked_obs = ppo_agent.stack_frames(frames)
+        obs_tensor = ppo_agent.obs_to_tensor(stacked_obs).unsqueeze(0)
+
+        # Get action from agent
+        with torch.no_grad():
+            actions, _, _, _ = self.agent.get_action_and_value(obs_tensor)
+
+        action = actions.squeeze(0).cpu().numpy().tolist()
+        return action
+
+
+# Global singleton PPO agent (loaded once, shared by all aivai games)
+_global_ppo_agent: Optional[PPOAgent] = None
+
+def get_ppo_agent() -> PPOAgent:
+    """Get or create the global PPO agent singleton"""
+    global _global_ppo_agent
+    if _global_ppo_agent is None:
+        _global_ppo_agent = PPOAgent()
+    return _global_ppo_agent
 
 
 # ==== Data Models ====
 
 class GameCreateRequest(BaseModel):
     """Request to create a new game instance."""
-    mode: str = "pvai"  # "pvai" or "pvp"
+    mode: str = "pvai"  # "pvai", "pvp", or "aivai"
     game_id: Optional[str] = None  # Optional custom game ID
 
 
@@ -86,15 +156,33 @@ class GameInstance:
         self.last_step_time = time.time()
 
         # Create Gymnasium environment
-        is_p2_ai = (mode == "pvai")
+        is_p1_ai = (mode == "aivai")  # Player 1 is AI in aivai mode
+        is_p2_ai = (mode == "pvai" or mode == "aivai")  # Player 2 is AI in both pvai and aivai
+
         self.env = PykachuEnv(
-            is_player_1_computer=False,
+            is_player_1_computer=is_p1_ai,
             is_player_2_computer=is_p2_ai,
-            render_mode="human"
+            render_mode=None  # Use None for headless mode (no rendering)
         )
 
+        # Initialize PPO agent for aivai mode (using global singleton)
+        self.ppo_agent = None
+        self.ai_frames = None  # Frame stack for AI
+        if mode == "aivai":
+            try:
+                self.ppo_agent = get_ppo_agent()  # Use global singleton
+                self.ai_frames = self.ppo_agent.create_frame_stack()
+                logging.info(f"[GAME {game_id}] Using shared PPO AI (player1)")
+            except Exception as e:
+                logging.error(f"[GAME {game_id}] Failed to load PPO agent: {e}")
+                raise RuntimeError(f"Failed to load PPO agent: {e}")
+
         # Reset environment
-        self.env.reset()
+        reset_result = self.env.reset()
+        if isinstance(reset_result, tuple):
+            self.last_obs, _ = reset_result
+        else:
+            self.last_obs = reset_result
 
         # Action array format reference:
         # [x, y, power] where:
@@ -133,12 +221,17 @@ class GameInstance:
         # Update last step time
         self.last_step_time = time.time()
 
-        # Use the provided action arrays
-        p1 = p1_action
+        # In aivai mode, use PPO agent for player1
+        if self.mode == "aivai" and self.ppo_agent is not None:
+            p1 = self.ppo_agent.get_action(self.last_obs, self.ai_frames)
+            logging.info(f"[GAME] AI Player 1 action: {p1}")
+        else:
+            p1 = p1_action
+
         p2 = p2_action if p2_action is not None else [1, 1, 0]  # Default to "no action"
 
         # Log actions if not "none"
-        if p1 != [1, 1, 0]:
+        if p1 != [1, 1, 0] and self.mode != "aivai":
             logging.info(f"[GAME] Player 1 action: {p1}")
         if p2 != [1, 1, 0]:
             logging.info(f"[GAME] Player 2 action: {p2}")
@@ -149,6 +242,9 @@ class GameInstance:
             player2_action=p2
         )
 
+        # Store observation for next step (needed for AI)
+        self.last_obs = obs
+
 
         # Update scores if someone scored
         if terminated:
@@ -157,7 +253,15 @@ class GameInstance:
             else:  # Right side
                 self.score_p1 += 1
             # Reset for next round
-            self.env.reset()
+            reset_result = self.env.reset()
+            if isinstance(reset_result, tuple):
+                self.last_obs, _ = reset_result
+            else:
+                self.last_obs = reset_result
+
+            # Reset PPO agent frame stack if in aivai mode
+            if self.mode == "aivai" and self.ppo_agent is not None:
+                self.ai_frames = self.ppo_agent.create_frame_stack()
 
         return self.get_state(terminated)
 
