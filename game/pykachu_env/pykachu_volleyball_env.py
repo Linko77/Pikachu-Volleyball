@@ -69,7 +69,7 @@ class PykachuEnv(gym.Env):
 
         ball = self.physics.ball
         player1_x = self.physics.player1.x
-
+        player1_y = self.physics.player1.y
         shaping = 0.0
 
         # Efficiency: tiny step penalty to discourage stalling (further softened).
@@ -88,7 +88,7 @@ class PykachuEnv(gym.Env):
                 if (ball.expected_landing_x < player1_x and moving_left) or \
                    (ball.expected_landing_x > player1_x and moving_right):
                     shaping += 0.015
-
+        
         # Ball control + Rally pressure: when we hit, reward useful, penalize faults.
         if self._player1_hit_ball:
             shaping += 0.05  # basic contact bonus
@@ -123,7 +123,7 @@ class PykachuEnv(gym.Env):
             shaping -= 0.00015 * min(distance_to_ball, GROUND_HALF_WIDTH)
 
         # Penalize ground power-hit/dive when ball is safely away on opponent side or far from us.
-        if action[2] == 1:
+        if action[2] == 1 and player1_y > 200:
             ball_on_opponent = ball.expected_landing_x > GROUND_HALF_WIDTH + 5
             far_from_ball = abs(ball.x - player1_x) > 100
             if ball_on_opponent or far_from_ball:
@@ -168,8 +168,8 @@ class PykachuEnv(gym.Env):
 
 
         # Keep shaping bounded so terminal reward dominates.
-        shaping = float(np.clip(shaping, -0.15, 0.5))
-
+        shaping = float(np.clip(shaping, -0.2, 0.5))
+        
 
         return base + shaping
 
