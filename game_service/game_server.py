@@ -133,18 +133,22 @@ class GameInstance:
         # Update last step time
         self.last_step_time = time.time()
 
-        # Use the provided action array directly
-        action = p1_action
+        # Use the provided action arrays
+        p1 = p1_action
+        p2 = p2_action if p2_action is not None else [1, 1, 0]  # Default to "no action"
 
-        # Log action if not "none"
-        if action != [1, 1, 0]:
-            logging.info(f"[GAME] Player 1 action: {action}")
+        # Log actions if not "none"
+        if p1 != [1, 1, 0]:
+            logging.info(f"[GAME] Player 1 action: {p1}")
+        if p2 != [1, 1, 0]:
+            logging.info(f"[GAME] Player 2 action: {p2}")
 
-        # TODO: For PvP mode, handle p2_action
-        # Currently the environment manages AI internally
+        # Step environment with both player actions
+        obs, reward, terminated, info = self.env.step(
+            player1_action=p1,
+            player2_action=p2
+        )
 
-        # Step environment with the actual action
-        obs, reward, terminated, info = self.env.step(action)
 
         # Update scores if someone scored
         if terminated:
@@ -381,7 +385,7 @@ async def step_game(game_id: str, request: GameStepRequest):
         raise HTTPException(status_code=404, detail="Game not found")
 
     # Log incoming action at API level
-    logging.debug(f"[API] Step request for {game_id}: p1={request.p1_action}, p2={request.p2_action}")
+    logging.info(f"[API] Step request for {game_id}: p1={request.p1_action}, p2={request.p2_action}")
 
     state = game.step(request.p1_action, request.p2_action)
     return {"state": asdict(state)}
