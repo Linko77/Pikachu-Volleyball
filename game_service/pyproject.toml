@@ -11,4 +11,5 @@ dependencies = [
     "pygame>=2.5.0",
     "torch>=2.0.0",
     "numpy>=1.24.0",
+    "tqdm>=4.67.1",
 ]
