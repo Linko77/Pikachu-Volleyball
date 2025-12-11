@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import configparser
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -29,7 +30,13 @@ except ImportError:
 # ==== Configuration ====
 
 def _load_server_url() -> str:
-    """Load Match Server URL from config/configfile.ini"""
+    """Load Match Server URL from environment variable or config/configfile.ini"""
+    # First, check environment variable
+    env_url = os.getenv("MATCH_SERVER_URL")
+    if env_url:
+        return env_url.rstrip("/")
+
+    # Then, try loading from config file
     try:
         config_path = Path(__file__).parent.parent / "config" / "configfile.ini"
         if config_path.exists():

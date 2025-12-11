@@ -20,6 +20,7 @@ Game Client - 通用遊戲客戶端
 
 import configparser
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -29,7 +30,13 @@ import requests
 # ==== Configuration ====
 
 def _load_game_service_url() -> str:
-    """Load Game Service URL from config/configfile.ini"""
+    """Load Game Service URL from environment variable or config/configfile.ini"""
+    # First, check environment variable
+    env_url = os.getenv("GAME_SERVICE_URL")
+    if env_url:
+        return env_url.rstrip("/")
+
+    # Then, try loading from config file
     try:
         config_path = Path(__file__).parent.parent / "config" / "configfile.ini"
         if config_path.exists():

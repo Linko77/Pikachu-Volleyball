@@ -41,6 +41,22 @@ services:
     networks:
       - pikachu-network
 
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: pikachu-client
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MATCH_SERVER_URL=http://match-server:12345
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - match-server
+    restart: unless-stopped
+    networks:
+      - pikachu-network
+
 networks:
   pikachu-network:
     driver: bridge
