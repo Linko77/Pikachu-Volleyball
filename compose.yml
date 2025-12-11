@@ -1,0 +1,46 @@
+services:
+  game-service:
+    build:
+      context: .
+      dockerfile: game_service/Dockerfile
+    container_name: pikachu-game-service
+    ports:
+      - "12346:12346"
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:12346/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - pikachu-network
+
+  match-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: pikachu-match-server
+    ports:
+      - "12345:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GAME_SERVICE_URL=http://game-service:12346
+    depends_on:
+      game-service:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - pikachu-network
+
+networks:
+  pikachu-network:
+    driver: bridge

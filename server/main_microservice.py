@@ -8,6 +8,7 @@ instead of directly importing game physics.
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Dict, List, Optional, Set, Tuple, Union
@@ -24,7 +25,7 @@ from game_service_client import GameServiceClient
 
 TICK_RATE = 40.0
 STATE_BROADCAST_INTERVAL = 1 / TICK_RATE
-GAME_SERVICE_URL = "http://localhost:12346"  # Game Service endpoint
+GAME_SERVICE_URL = os.getenv("GAME_SERVICE_URL", "http://localhost:12346")  # Game Service endpoint
 
 
 # ==== Data Models ====
