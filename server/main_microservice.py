@@ -22,7 +22,7 @@ from game_service_client import GameServiceClient
 
 # ==== Configuration ====
 
-TICK_RATE = 20.0
+TICK_RATE = 40.0
 STATE_BROADCAST_INTERVAL = 1 / TICK_RATE
 GAME_SERVICE_URL = "http://localhost:12346"  # Game Service endpoint
 
@@ -107,7 +107,6 @@ class Match:
             "observer": set()  # 只讀觀察者
         }
 
-        print("ASD")
         logging.info("start loop")
         self._loop_task = asyncio.create_task(self._run_loop())
 
@@ -256,7 +255,6 @@ class Match:
 
         # Update input buffer
         self.input_buffer[role] = (move, time.time())
-        print("Receive Action")
         self.registered_players[role]["last_input"] = time.time()
 
         return {
@@ -362,10 +360,9 @@ class Match:
     # ---- Game Loop ----
 
     async def _run_loop(self) -> None:
-        """Main game loop that steps the game at 60 FPS."""
+        """Main game loop that steps the game at 20 FPS."""
         try:
             while self.running:
-                print("A FHKJSDFKSHFKSJHFLKJDHFKJSH")
                 start = asyncio.get_event_loop().time()
                 await self._step_game()
 
@@ -373,13 +370,9 @@ class Match:
                 self.state_sequence += 1
 
                 elapsed = asyncio.get_event_loop().time() - start
-                print(max(0.0, STATE_BROADCAST_INTERVAL - elapsed))
                 await asyncio.sleep(max(0.0, STATE_BROADCAST_INTERVAL - elapsed))
 
-            print("C FHKJSDFKSHFKSJHFLKJDHFKJSH")
-        except asyncio.CancelledError as e:
-            print(e)
-            print("D FHKJSDFKSHFKSJHFLKJDHFKJSH")
+        except asyncio.CancelledError:
             pass
 
     async def _step_game(self) -> None:
@@ -406,24 +399,31 @@ class Match:
         if p2_action and p2_action != [1, 1, 0]:
             logging.debug(f"[STEP] Sending p2_action to game: {p2_action}")
 
-        # Call Game Service to step the game
-
-        """
-        step_response = self.game_client.step_game(
-            self.game_id,
-            p1_move,
-            p2_action
-        )
+        # Call Game Service to step the game (in thread pool to avoid blocking)
+        try:
+            step_response = await asyncio.to_thread(
+                self.game_client.step_game,
+                self.game_id,
+                p1_move,
+                p2_action
+            )
+        except AttributeError:
+            # Python < 3.9, use run_in_executor instead
+            loop = asyncio.get_event_loop()
+            step_response = await loop.run_in_executor(
+                None,
+                self.game_client.step_game,
+                self.game_id,
+                p1_move,
+                p2_action
+            )
 
         if "error" in step_response:
             print(f"Game step error: {step_response['error']}")
             return
-            """
-        st = self.game_client.get_state(self.game_id)
-        print(st)
-        self.latest_payload = self._convert_state_to_payload(st["state"])
-        print("B FHKJSDFKSHFKSJHFLKJDHFKJSH")
-        print(self.latest_payload)
+
+        if "state" in step_response:
+            self.latest_payload = self._convert_state_to_payload(step_response["state"])
 
         # 新增：主動推送狀態給 WebSocket 客戶端
         await self.broadcast_state(self.latest_payload)
