@@ -14,4 +14,4 @@ RUN mkdir -p /app/data
 
 # Expose no ports (client connects to servers)
 
-CMD ["uv", "run", "python", "labview_bridge.py"]
+CMD ["uv", "run", "labview_bridge.py"]
