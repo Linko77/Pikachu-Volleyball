@@ -9,7 +9,7 @@ from collections import deque
 
 pygame.init()
 
-MODEL_PATH = "checkpoints/ppo_pykachu_update_100.pt"  # change to a specific checkpoint if desired
+MODEL_PATH = "checkpoints/ppo_pykachu.pt"  # change to a specific checkpoint if desired
 ACTION_REPEAT_TEST = 1  # smaller repeat to slow down play
 
 env = pykachu_env.PykachuEnv(render_mode='human', is_player_1_computer=False, is_player_2_computer=True)
